@@ -1,0 +1,10 @@
+# PrismClaw Agent 依赖
+# 基于 AgentScope ReActAgent 框架
+
+agentscope>=1.0.18
+fastapi>=0.100.0
+uvicorn>=0.30.0
+pydantic>=2.0
+PyYAML>=6.0
+rich>=15.0
+aiofiles>=23.0

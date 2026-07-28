@@ -1,0 +1,42 @@
+# PrismClaw Agent 配置
+# 框架: AgentScope ReActAgent + 自定义 PrismClawGuard
+# 核心能力: 每轮上下文可视化 + HITL工具确认 + 技能系统
+
+llm:
+  provider: "dsv4-local"
+  temperature: 0.0
+  enable_thinking: false
+
+providers:
+  dsv4-local:
+    api_key: "EMPTY"
+    api_base: "http://YOUR_MODEL_HOST:8900/v1"  # 上传前已脱敏；本地运行改回你的模型服务地址
+    model: "dsv4"
+    enable_thinking: false
+
+agent:
+  max_iters: 6           # ReAct最大迭代次数（治死循环：同一工具重复调用最多到此为止）
+  parallel_tool_calls: false
+
+context:
+  token_budget: 32000          # Token预算上限
+  compress_threshold: 0.8      # 超预算80%触发压缩
+  keep_recent_messages: 6      # 压缩时保留最近N条
+
+workspace:
+  dir: "workspace"
+  skills_dir: "skills"
+  auto_generate_tools_md: true
+
+logging:
+  dir: "session_logs"
+  cli_display: true
+  save_markdown: true
+  save_json: true
+
+server:
+  host: "0.0.0.0"
+  port: 8765
+
+session:
+  expires: 300    # 会话过期时间(秒)
