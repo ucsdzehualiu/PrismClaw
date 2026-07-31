@@ -10,16 +10,16 @@ llm:
 providers:
   dsv4-local:
     api_key: "EMPTY"
-    api_base: "http://YOUR_MODEL_HOST:8900/v1"  # 上传前已脱敏；本地运行改回你的模型服务地址
+    api_base: "http://YOUR_MODEL_HOST:8900/v1"  # 本地运行改回你的模型服务地址
     model: "dsv4"
     enable_thinking: false
 
 agent:
-  max_iters: 6           # ReAct最大迭代次数（治死循环：同一工具重复调用最多到此为止）
+  max_iters: 30
   parallel_tool_calls: false
 
 context:
-  token_budget: 32000          # Token预算上限
+  token_budget: 320000
   compress_threshold: 0.8      # 超预算80%触发压缩
   keep_recent_messages: 6      # 压缩时保留最近N条
 
