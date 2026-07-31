@@ -272,20 +272,20 @@ class ContextViz:
         return str(c)
 
     def _preview_messages(self, messages: List[Any]) -> List[MessagePreview]:
-        """生成消息预览。System 只给字数，其他给截断预览。"""
+        """生成消息预览。System 只给字数，其他给截断预览（含工具调用/结果）。"""
         out: List[MessagePreview] = []
         for m in messages:
             role = getattr(m, "role", "unknown")
             content = getattr(m, "content", "")
-            if not isinstance(content, str):
-                content = str(content)
+            # 用 _content_to_text 正确解析 tool_use / tool_result 块
+            text = self._content_to_text(content)
             if role == "system":
-                out.append(MessagePreview(role=role, chars=len(content), preview="(见上方分块)"))
+                out.append(MessagePreview(role=role, chars=len(text), preview="(见上方分块)"))
             else:
                 out.append(MessagePreview(
                     role=role,
-                    chars=len(content),
-                    preview=content[:160] + ("..." if len(content) > 160 else ""),
+                    chars=len(text),
+                    preview=text[:160] + ("..." if len(text) > 160 else ""),
                 ))
         return out
 

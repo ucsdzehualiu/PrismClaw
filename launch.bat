@@ -9,9 +9,16 @@ echo.
 
 cd /d "%~dp0"
 
-REM ---- 清理上一轮残留：按端口杀旧进程 + 清 __pycache__（交给 Python，正则可靠）----
+REM ---- 激活 conda 环境（如果可用），否则用系统 python ----
+where conda >nul 2>&1
+if not errorlevel 1 (
+    call conda activate ai-course >nul 2>&1
+)
+set "PYTHON=python"
+
+REM ---- 清理上一轮残留：按端口杀旧进程 + 清 __pycache__ ----
 echo [*] Cleaning up any previous instance...
-python cleanup.py
+%PYTHON% cleanup.py
 echo.
 
 echo Starting server on port 8765...
@@ -19,7 +26,7 @@ echo Opening browser when ready...
 echo.
 
 REM ---- 启动新 server（窗口标题便于识别）----
-start "PrismClaw Server" /B python server.py
+start "PrismClaw Server" /B %PYTHON% server.py
 
 REM ---- 等端口真正起来再开浏览器 ----
 set "READY=0"
@@ -46,5 +53,5 @@ pause >nul
 
 REM ---- 退出时也清干净（再杀一次端口占用）----
 echo [*] Shutting down...
-python cleanup.py
+%PYTHON% cleanup.py
 echo Bye.

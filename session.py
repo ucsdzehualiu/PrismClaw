@@ -14,12 +14,40 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional
 
-from prismclaw_guard import PendingToolUse
-
 
 class SessionStatus(str, Enum):
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
+
+
+class PendingToolUse:
+    """一个待确认的工具调用，带 asyncio.Future 供 middleware await。
+
+    status 保留用于前端/调试查询；确认/拒绝通过 resolve() 完成 future。
+    """
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+    def __init__(self, tool_use: dict, future: "asyncio.Future[bool]"):
+        self.tool_use = tool_use
+        self.future = future
+        self.status = self.PENDING
+
+    @property
+    def name(self) -> str:
+        return self.tool_use.get("name", "unknown")
+
+    @property
+    def input(self) -> Any:
+        return self.tool_use.get("input", {})
+
+    def resolve(self, approved: bool) -> None:
+        """完成 future，唤醒正在 await 的 middleware。"""
+        self.status = self.APPROVED if approved else self.REJECTED
+        if not self.future.done():
+            self.future.set_result(approved)
 
 
 @dataclass
@@ -53,6 +81,9 @@ class Session:
         self.status = SessionStatus.ACTIVE
         self.pending_req: Dict[str, AgentRequest] = {}
         self.pending_tool_calls: List[PendingToolUse] = []
+        self.auto_approve = False  # /approve_all 模式：跳过所有工具确认
+        # 当前活跃请求的 response_queue，供 middleware 推 confirm status 事件
+        self.current_response_queue: Optional[asyncio.Queue] = None
 
     async def add_pending_tool(self, pending: PendingToolUse):
         async with self.lock:
@@ -65,6 +96,17 @@ class Session:
     async def pop_pending_tool(self) -> Optional[PendingToolUse]:
         async with self.lock:
             return self.pending_tool_calls.pop(0) if self.pending_tool_calls else None
+
+    async def resolve_pending(self, approved: bool) -> Optional[PendingToolUse]:
+        """取出头部 pending 并 resolve 其 future。供 /approve /reject 调用。
+
+        返回被 resolve 的 pending（若有），供调用方做后续提示。
+        """
+        async with self.lock:
+            pending = self.pending_tool_calls.pop(0) if self.pending_tool_calls else None
+        if pending:
+            pending.resolve(approved)
+        return pending
 
     async def activate(self):
         async with self.lock:

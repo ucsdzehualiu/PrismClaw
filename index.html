@@ -199,6 +199,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 .badge.stopped{background:rgba(248,113,113,0.15);color:var(--danger)}
 .badge.pending{background:rgba(245,158,11,0.15);color:var(--warn)}
 .badge.live{background:rgba(108,140,255,0.15);color:var(--accent)}
+.badge.reasoning{background:rgba(167,139,250,0.15);color:var(--purple)}
 </style>
 </head>
 <body>
@@ -273,6 +274,8 @@ let toolCalls = [];
 let contextRound = 0;
 let abortController = null;
 let messageBlocks = new Map();    // msg_id -> latest contents[]
+let lastAsstId = '';              // magic 命令复用最后一条 assistant 气泡
+let lastAsstMsg = null;
 let messageIdOrder = [];          // msg_id order
 
 // ====== DOM ======
@@ -312,6 +315,8 @@ async function sendMessage() {
   // Create assistant message placeholder
   const asstId = addAssistantMessage('', true);
   const asstMsg = { role: 'assistant', content: '', contents: [], toolCalls: [] };
+  lastAsstId = asstId;      // magic 命令复用
+  lastAsstMsg = asstMsg;
 
   // Reset round
   contextRound++;
@@ -339,6 +344,7 @@ async function sendMessage() {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let gotDoneEvent = false;  // 后端真正推了 phase:done 才算完成
 
     while (true) {
       const { done, value } = await reader.read();
@@ -368,6 +374,7 @@ async function sendMessage() {
           if (event.type === 'status' || (event.data && event.data.type === 'status')) {
             const st = event.data || event;
             handleLiveStatus(st);
+            if (st.phase === 'done') gotDoneEvent = true;  // 后端确认完成
             // guard 发的专门确认事件 → 直接渲染卡片，不靠文本猜
             if (st.phase === 'confirm') {
               renderConfirmCard(asstId, st.detail || '');
@@ -400,21 +407,33 @@ async function sendMessage() {
           }
 
           if (event.last) {
-            // Don't break — context_view and other events may follow in same buffer
-            setStatus('done', '完成');
+            // is_last_chunk 只表示"当前这条流式消息的最后一块"，不是整个回复结束。
+            // agent 后面可能还要调工具、继续推理。真正的结束由后端 phase:"done" 事件处理。
+            // 这里什么都不做，避免过早把状态置成"完成"。
           }
         } catch (e) { /* skip parse errors */ }
       }
     }
   } catch (err) {
     if (err.name !== 'AbortError') {
-      updateAssistantContent(asstId, `\n\n❌ 连接错误: ${err.message}`);
+      let hint = '❌ 连接失败';
+      if (err.message.includes('Failed to fetch') || err.message.includes('NetworkError')) {
+        hint = '❌ 无法连接服务器 — 请确认 launch.bat 正在运行（端口 8765）';
+      } else if (err.message.includes('HTTP')) {
+        hint = `❌ 服务器错误 (${err.message})`;
+      }
+      updateAssistantContent(asstId, `\n\n${hint}`);
     }
   }
 
   sendBtn.disabled = false;
   showStopButton(false);
-  setStatus('done', '完成');
+  // 只有后端真正推了 phase:done 才设完成；否则流中断了（agent 可能还在跑）
+  if (gotDoneEvent) {
+    setStatus('done', '完成');
+  } else {
+    setStatus('thinking', '后台继续');
+  }
 }
 
 // ====== Rebuild message from messageBlocks ======
@@ -551,6 +570,7 @@ function renderConfirmCard(asstId, detail) {
     <div style="padding:6px 12px;font-size:12px;color:var(--text-dim);white-space:pre-wrap">${escapeHtml(detail)}</div>
     <div class="confirm-actions">
       <button class="btn accent" onclick="sendMagic('/approve')">✓ 允许执行</button>
+      <button class="btn" onclick="sendMagic('/approve_all')" style="background:var(--success);color:#fff">⚡ 允许全部</button>
       <button class="btn" onclick="sendMagic('/reject')">✕ 拒绝</button>
     </div>`;
   // 贴到最近一个 loading tool card 后面
@@ -581,6 +601,7 @@ function maybeRenderConfirm(asstId, content) {
     <div class="tool-header"><span class="arrow">▶</span> 🔒 需要你的确认</div>
     <div class="confirm-actions">
       <button class="btn accent" onclick="sendMagic('/approve')">✓ 允许执行</button>
+      <button class="btn" onclick="sendMagic('/approve_all')" style="background:var(--success);color:#fff">⚡ 允许全部</button>
       <button class="btn" onclick="sendMagic('/reject')">✕ 拒绝</button>
     </div>`;
 
@@ -602,9 +623,8 @@ function maybeRenderConfirm(asstId, content) {
   scrollChat();
 }
 
-// 发送 /approve 或 /reject —— 走 /chat（和正常消息一样）。
-// approve 是正常请求：handle_magic_command 改 pending 状态，
-// 然后这个请求的 agent reply 会读到 APPROVED 并重放工具执行。
+// 发送 /approve 或 /reject —— 走轻量 /resolve 端点，不开新 SSE 流、不 abort 原流。
+// agent 后续输出继续从触发确认的那个原请求的 SSE 流出来。
 async function sendMagic(cmd) {
   const text = cmd.trim();
   if (!text) return;
@@ -612,13 +632,26 @@ async function sendMagic(cmd) {
   document.querySelectorAll('.confirm-card').forEach(c => {
     c.style.opacity = '0.5';
     c.style.pointerEvents = 'none';
-    const h = c.querySelector('.tool-header');
-    if (h) h.textContent = '▶ ' + (text === '/approve' ? '✓ 已允许' : '✕ 已拒绝');
     c.querySelectorAll('button').forEach(b => b.remove());
   });
-  // 当作正常消息发送（走 sendMessage 的 SSE 流逻辑）
-  userInput.value = text;
-  await sendMessage();
+  const approved = text === '/approve' || text === '/approve_all';
+  // /approve_all 额外开启自动放行
+  if (text === '/approve_all') {
+    try { await fetch('/resolve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SESSION_ID,approved:true,auto_approve:true})}); } catch(e){}
+    return;
+  }
+  if (text === '/approve_all off') {
+    try { await fetch('/resolve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SESSION_ID,approved:false,auto_approve_off:true})}); } catch(e){}
+    return;
+  }
+  // /approve 或 /reject：只 resolve，原 SSE 流继续输出
+  try {
+    await fetch('/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: SESSION_ID, approved: approved }),
+    });
+  } catch (e) { console.warn('[resolve] failed', e); }
 }
 
 function addToolCard(asstId, tc) {
@@ -885,31 +918,40 @@ function showLiveStatus(show, text, cls) {
 function handleLiveStatus(st) {
   const phase = st.phase || '';
   const detail = st.detail || '';
-  // 更新工具栏实时状态条
+  // 更新工具栏实时状态条 + 主状态徽章（两者同步，避免主徽章卡在旧态）
   if (phase === 'thinking') {
     showLiveStatus(true, '🧠 思考中…', 'live');
+    setStatus('thinking', '思考中');
+  } else if (phase === 'reasoning') {
+    const preview = (st.preview || detail || '').slice(-60);
+    showLiveStatus(true, '🧠 ' + preview, 'reasoning');
+    setStatus('thinking', '推理中');
   } else if (phase === 'acting') {
     showLiveStatus(true, '🔧 ' + detail, 'acting');
+    setStatus('acting', '执行中');
   } else if (phase === 'pending') {
     showLiveStatus(true, '🔒 待确认', 'pending');
+    setStatus('pending', '待确认');
   } else if (phase === 'confirm') {
     showLiveStatus(true, '🔒 待确认', 'pending');
+    setStatus('pending', '待确认');
   } else if (phase === 'heartbeat') {
     // 心跳：agent 还在工作，别让用户以为它死了
     showLiveStatus(true, '⏳ ' + detail, 'live');
   } else if (phase === 'max_iters') {
     showLiveStatus(true, '⚠️ ' + detail, 'pending');
+    setStatus('pending', '已达上限');
   } else if (phase === 'error') {
     showLiveStatus(true, '❌ ' + detail, 'pending');
+    setStatus('stopped', '出错');
   } else if (phase === 'paused') {
     showLiveStatus(true, '🔒 ' + detail, 'pending');
+    setStatus('pending', '已暂停');
   } else if (phase === 'done') {
     showLiveStatus(false);
-  }
-  // 同时把状态推进到 assistant 气泡内（作为局部反馈，不覆盖正文）
-  if (detail && phase !== 'done') {
-    const liveNote = document.getElementById('asst-live-note');
-    if (liveNote) liveNote.textContent = detail;
+    setStatus('done', '完成');
+    // 1.5s 后复位为就绪（若没有新一轮请求在进行）
+    setTimeout(() => { if (!currentRequestId) setStatus('thinking', '就绪'); }, 1500);
   }
 }
 

@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 
@@ -20,22 +21,22 @@ from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
 from agentscope.pipeline import stream_printing_messages
 
-from prismclaw_guard import PrismClawGuardMixin, PendingStatus
+from prismclaw_guard import make_hitl_middleware
 from session import Session, SessionManager, AgentRequest, SessionStatus
 from tools import (
     build_toolkit,
     format_system_prompt,
     REASONING_HINT_TEMPLATE,
 )
-from model_config import build_model, load_config
+from model_config import build_model, build_token_counter, load_config
 from context_viz import ContextViz, TokenStats
 from conf import FLAGS
 
 
-# ---- Mixin 组装：PrismClawAgent = PrismClawGuard + ReActAgent ----
+# ---- Mixin 组装：PrismClawAgent = ReActAgent（HITL 走 middleware，不再重写内部循环） ----
 
-class PrismClawAgent(PrismClawGuardMixin, ReActAgent):
-    """PrismClaw Agent = ReActAgent + HITL 工具确认。"""
+class PrismClawAgent(ReActAgent):
+    """PrismClaw Agent = ReActAgent。HITL 由 toolkit middleware 实现。"""
     pass
 
 
@@ -69,10 +70,35 @@ async def register_keepalive(agent: ReActAgent, sess: Session):
         agent.register_instance_hook(hook, "keepalive", activate)
 
 
+async def register_thinking_cleanup(agent: ReActAgent):
+    """每轮推理前清掉 ThinkingBlock，防 formatter warning + 省 token。"""
+    async def strip_thinking(agent: ReActAgent, kwargs):
+        try:
+            gm = agent.memory.get_memory()
+            if inspect.iscoroutine(gm):
+                gm = await gm
+            for m in (gm or []):
+                content = getattr(m, "content", None)
+                if isinstance(content, list):
+                    # 过滤 thinking 块（dict 形式或 ThinkingBlock 对象）
+                    new_content = [c for c in content if (
+                        getattr(c, "type", "") if hasattr(c, "type")
+                        else c.get("type", "") if isinstance(c, dict)
+                        else ""
+                    ) != "thinking"]
+                    if len(new_content) != len(content):
+                        m.content = new_content
+        except Exception:
+            pass
+
+    agent.register_instance_hook("pre_reasoning", "strip_thinking", strip_thinking)
+
+
 # ---- 魔术命令处理 ----
 
 async def handle_magic_command(request: AgentRequest, sess: Session):
-    """处理 /approve 和 /reject 魔术命令。"""
+    """处理 /approve /reject /approve_all 等魔术命令。
+    返回 True 表示已处理（需要重新驱动 agent 继续），False 表示普通消息。"""
     text = ""
     if isinstance(request.content, list):
         for block in request.content:
@@ -84,17 +110,41 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
 
     text = text.strip()
     if not text.startswith("/"):
-        return
+        return False
 
     cmd = text[1:]
     if cmd == "approve":
-        pending = await sess.get_pending_tool()
-        if pending:
-            pending.status = PendingStatus.APPROVED
+        await sess.resolve_pending(True)   # 唤醒 middleware 放行
+        return True
     elif cmd == "reject":
-        pending = await sess.get_pending_tool()
-        if pending:
-            pending.status = PendingStatus.REJECTED
+        await sess.resolve_pending(False)  # 唤醒 middleware 跳过执行
+        return True
+    elif cmd == "approve_all":
+        sess.auto_approve = True
+        await sess.resolve_pending(True)   # 放行当前堵着的（若有）
+        return True
+    elif cmd == "approve_all off":
+        sess.auto_approve = False
+        return True
+    return False  # 不认识的 / 命令，交给 agent 处理
+
+
+# ---- 上下文软截断（防 memory 无限增长卡死） ----
+
+async def _stream_with_chunk_timeout(agen, chunk_timeout: float = 120.0):
+    """给 async generator 加 chunk 间隔超时。
+
+    超过 chunk_timeout 秒没收到任何 chunk → 抛 asyncio.TimeoutError，
+    由上层转成 error 终态，避免模型流式卡死时心跳掩盖死局。
+    首个 chunk 也限时（覆盖"模型一开始就卡"的情况）。
+    """
+    ait = agen.__aiter__()
+    while True:
+        try:
+            chunk = await asyncio.wait_for(ait.__anext__(), timeout=chunk_timeout)
+        except StopAsyncIteration:
+            return
+        yield chunk
 
 
 # ---- Agent Runner（每会话一个后台任务） ----
@@ -103,6 +153,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     """每个 session 的后台 Agent 循环。"""
     ctx_cfg = cfg.get("context", {})
     token_budget = ctx_cfg.get("token_budget", 32000)
+    keep_recent = ctx_cfg.get("keep_recent_messages", 6)
+    compress_threshold = ctx_cfg.get("compress_threshold", 0.8)
     max_iters = cfg.get("agent", {}).get("max_iters", 50)
     log_dir = cfg.get("logging", {}).get("dir", "session_logs")
 
@@ -110,8 +162,20 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
 
     # 整个会话复用同一个 Agent（保留 memory，实现多轮上下文真实累积）
     toolkit = await build_toolkit(workspace_dir)
-    system_prompt = format_system_prompt([], workspace_dir)
+    # 注册 HITL middleware（绑定本会话）：高风险工具拦截确认，其余放行
+    toolkit.register_middleware(make_hitl_middleware(sess))
+    system_prompt = format_system_prompt([], workspace_dir, max_iters=max_iters)
     model = build_model(cfg, stream=True)
+
+    # 官方压缩配置：超 token 预算*阈值时，用 LLM 生成结构化摘要并标记已压缩消息。
+    # 复用主模型 dsv4 生成摘要（compression_model 留 None 即用 agent.model）。
+    compression_config = ReActAgent.CompressionConfig(
+        enable=True,
+        agent_token_counter=build_token_counter(cfg),
+        trigger_threshold=int(token_budget * compress_threshold),
+        keep_recent=keep_recent,
+    )
+
     agent = PrismClawAgent(
         name="PrismClaw",
         sys_prompt=system_prompt,
@@ -121,11 +185,12 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         memory=InMemoryMemory(),
         max_iters=max_iters,
         parallel_tool_calls=cfg.get("agent", {}).get("parallel_tool_calls", True),
-        _prismclaw_sess=sess,
+        compression_config=compression_config,
     )
     agent.set_console_output_enabled(False)
     await register_reasoning_hint(agent)
     await register_keepalive(agent, sess)
+    await register_thinking_cleanup(agent)
 
     while True:
         request, status = await sess.get_request()
@@ -135,9 +200,48 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             break
 
         await sess.activate()
+        # 让 middleware 能往当前请求的流里推 confirm 事件
+        sess.current_response_queue = request.response_queue
 
         # 魔术命令
-        await handle_magic_command(request, sess)
+        is_magic = await handle_magic_command(request, sess)
+        pending_exists = bool(await sess.get_pending_tool()) if is_magic else False
+
+        # 普通消息进来时若仍有未确认的 pending → 自动拒绝它，让新消息能走
+        # （middleware 方式下 pending 是 await 中的 Future；resolve(False) 唤醒它跳过执行）
+        if not is_magic:
+            stuck_pending = await sess.get_pending_tool()
+            if stuck_pending:
+                await sess.resolve_pending(False)
+                try:
+                    await agent.memory.add(
+                        Msg(
+                            name="prismclaw_guard",
+                            content=(
+                                f"(内部信息) 之前有一个待确认的工具调用 "
+                                f"{stuck_pending.name}({stuck_pending.input}) "
+                                f"因用户发来新消息而自动放弃。请按用户最新输入继续。"
+                            ),
+                            role="user",
+                        ),
+                        marks=["STUCK_PENDING_DROP"],
+                    )
+                except Exception:
+                    pass
+
+        # 独立魔法命令（无 pending）：直接返回确认，不调 LLM
+        if is_magic and not pending_exists:
+            response_q = request.response_queue
+            await response_q.put({
+                "type": "status",
+                "phase": "thinking",
+                "step": 0,
+                "detail": ("已开启自动放行模式" if sess.auto_approve else "已执行"),
+            })
+            await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
+            await response_q.put(None)
+            await sess.finish_request(request)
+            continue
 
         try:
             response_q = request.response_queue
@@ -156,7 +260,15 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             sys_chars = len(system_prompt)
             sys_tokens_est = sys_chars  # CJK 简化估算
 
-            inputs = Msg(name="user", content=request.content, role="user")
+            # magic 命令（/approve 等）不把字面 "/approve" 进 memory，避免污染上下文
+            if is_magic:
+                inputs = Msg(
+                    name="user",
+                    content="(内部信息) 用户已确认/拒绝工具调用，请继续执行。",
+                    role="user",
+                )
+            else:
+                inputs = Msg(name="user", content=request.content, role="user")
 
             q = asyncio.Queue()
             async def streaming():
@@ -190,6 +302,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                     if request.canceled:
                         terminal_phase = "canceled"
                         return
+                    # 压缩由官方 ReActAgent.reply 每轮自动调 _compress_memory_if_needed()，
+                    # 无需在此手动截断。
                     # 实时状态：开始推理
                     await q.put({"type": "status", "phase": "thinking", "step": 0,
                                  "detail": "正在思考…"})
@@ -210,9 +324,26 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         for content in msg.content:
                             if isinstance(content, dict):
                                 ctype = content.get("type", "")
+                                # dsv4 thinking 推理过程 → 实时推给前端
+                                if ctype == "thinking":
+                                    reasoning = content.get("thinking", "")
+                                    if reasoning:
+                                        preview = reasoning[-120:].replace("\n", " ").strip()
+                                        current_phase["text"] = f"🧠 推理… {preview}"
+                                        await q.put({
+                                            "type": "status",
+                                            "phase": "reasoning",
+                                            "detail": reasoning,
+                                            "preview": preview,
+                                        })
+                                    continue
                                 if ctype == "text":
                                     raw_text = content.get("text", "")
-                                    # HITL 等待确认 → 推专门的 confirm 事件，前端直接渲染卡片
+                                    # 更新当前阶段：让心跳显示模型在说什么（截前80字）
+                                    if raw_text and isinstance(raw_text, str) and len(raw_text) > 2:
+                                        preview = raw_text[:80].replace("\n", " ").strip()
+                                        current_phase["text"] = f"推理中… {preview}"
+                                    # HITL 等待确认 → 推专门的 confirm 事件，前端直接渲染卡片（不重复发文本）
                                     if raw_text and "工具调用需要确认" in raw_text and "🔒" in raw_text:
                                         current_phase["text"] = "等待你确认工具调用"
                                         await q.put({
@@ -220,6 +351,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                                             "phase": "confirm",
                                             "detail": raw_text,
                                         })
+                                        continue  # 跳过文本块，前端已通过 status 事件渲染卡片
                                     elif raw_text and "等待确认" in raw_text:
                                         current_phase["text"] = "等待你确认工具调用"
                                         await q.put({
@@ -227,6 +359,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                                             "phase": "pending",
                                             "detail": "🔒 等待你确认工具调用（见下方「允许/拒绝」按钮）",
                                         })
+                                        continue  # 跳过文本块
                                     # AgentScope may return list/dict instead of str
                                     if isinstance(raw_text, list):
                                         raw_text = " ".join(
@@ -321,12 +454,6 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
 
                         await q.put(msg_ret)
 
-                    # 循环正常结束。判断是否因 max_iters 用尽而停（而非模型主动结束）。
-                    # ReActAgent 到上限时不抛异常，静默返回——这正是"卡住不动"的来源。
-                    # 用工具调用步数 vs max_iters 近似判断：若逼近上限，标记 max_iters。
-                    if step >= max_iters:
-                        terminal_phase = "max_iters"
-
                     # 推送 Token 统计和上下文快照
                     # InMemoryMemory.get_memory() 在 AgentScope 1.0.x 是协程，必须 await
                     mem_msgs = []
@@ -353,6 +480,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         else:
                             hist_tokens_est += len(str(m_content))
                     total_est = sys_tokens_est + hist_tokens_est
+                    # 本轮是否发生压缩：读官方 memory._compressed_summary 是否非空
+                    compressed_summary = getattr(agent.memory, "_compressed_summary", "") or ""
                     viz.set_tokens(TokenStats(
                         system_tokens=sys_tokens_est,
                         history_tokens=hist_tokens_est,
@@ -360,6 +489,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         total_tokens=total_est,
                         budget=token_budget,
                         pct=round(total_est / token_budget * 100, 1) if token_budget else 0,
+                        compressed=bool(compressed_summary),
+                        compress_info={"summary": compressed_summary[:200]} if compressed_summary else {},
                     ))
 
                     # 填充完整 System Prompt 与历史消息（供前端"完整 Prompt 检视器"展示）
@@ -371,6 +502,20 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                 except asyncio.CancelledError:
                     terminal_phase = "canceled"
                     await q.put({"cancel": True, "last": True, "contents": []})
+                except asyncio.TimeoutError:
+                    # 模型流式卡死（120s 无 chunk）→ 明确终态，不靠心跳掩盖
+                    print(f"[PrismClaw] Stream timeout: 120s 无 chunk，模型可能卡死")
+                    terminal_phase = "error"
+                    await q.put({
+                        "type": "status",
+                        "phase": "error",
+                        "detail": "模型响应超时（120 秒无输出），已自动终止本轮。请重试或简化请求。",
+                    })
+                    await q.put({
+                        "error": "stream_timeout",
+                        "last": True,
+                        "contents": [],
+                    })
                 except Exception as e:
                     print(f"[PrismClaw] Error: {e}\n{traceback.format_exc()}")
                     terminal_phase = "error"
@@ -391,10 +536,18 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         await asyncio.wait_for(hb_task, timeout=2)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         hb_task.cancel()
+                    # max_iters 统一判断：循环跑满且未被其他终态覆盖时，标记为 max_iters。
+                    # ReActAgent 到上限不抛异常静默返回，这是"卡住不动"的来源。
+                    if terminal_phase == "done" and step >= max_iters:
+                        terminal_phase = "max_iters"
                     # 推终态：绝不静默。让前端明确知道这一轮为什么结束。
                     if terminal_phase == "paused":
-                        # 暂停不算结束，不推 done；心跳已停，等 /approve 后新一轮会重新起心跳
-                        pass
+                        # 暂停不算结束，不推 done；但推一个 paused 状态让前端主徽章同步
+                        await q.put({
+                            "type": "status",
+                            "phase": "paused",
+                            "detail": "等待你确认工具调用（见下方「允许/拒绝」按钮）",
+                        })
                     elif terminal_phase == "max_iters":
                         await q.put({
                             "type": "status",
