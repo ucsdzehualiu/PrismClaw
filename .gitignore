@@ -15,3 +15,6 @@ __pycache__/
 smoke_*.txt
 smoke_*.log
 smoke_pid.txt
+# IDE
+.idea/
+.clawhub/
