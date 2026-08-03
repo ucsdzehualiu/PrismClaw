@@ -1,0 +1,38 @@
+# PrismClaw Agent — 示例配置（复制为 config.yaml 后填入你的 API Key）
+#
+# config.yaml 已在 .gitignore 中，不会被提交
+
+llm:
+  provider: "dsv4-local"
+  temperature: 0.0
+  enable_thinking: false
+
+providers:
+  dsv4-local:
+    api_key: "YOUR_API_KEY_HERE"
+    api_base: "http://your-server:8900/v1"
+    model: "dsv4"
+    enable_thinking: false
+
+agent:
+  max_iters: 30
+  parallel_tool_calls: false
+
+context:
+  token_budget: 320000
+  compress_threshold: 0.8
+  keep_recent_messages: 6
+
+workspace:
+  dir: "workspace"
+  skills_dir: "skills"
+
+logging:
+  dir: "session_logs"
+
+server:
+  host: "0.0.0.0"
+  port: 8765
+
+session:
+  expires: 300

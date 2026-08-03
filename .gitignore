@@ -1,20 +1,17 @@
+# Config — contains API keys, never commit
+config.yaml
+
+# Workspace — generated outputs, personal data, downloads
+workspace/
+
+# Session logs
+session_logs/
+
 # Python
 __pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-env/
+*.pyc
 
-# Runtime logs & session data
-session_logs/
-*.log
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Editor
-.idea/
-.vscode/
-*.swp
+# Runtime artifacts
+smoke_*.txt
+smoke_*.log
+smoke_pid.txt
