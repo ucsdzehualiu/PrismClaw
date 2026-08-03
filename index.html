@@ -277,6 +277,7 @@ let messageBlocks = new Map();    // msg_id -> latest contents[]
 let lastAsstId = '';              // magic 命令复用最后一条 assistant 气泡
 let lastAsstMsg = null;
 let messageIdOrder = [];          // msg_id order
+let _stopped = false;             // 用户点了停止，阻止 sendMessage 收尾覆盖状态
 
 // ====== DOM ======
 const chatMessages = document.getElementById('chatMessages');
@@ -425,7 +426,8 @@ async function sendMessage() {
 
   sendBtn.disabled = false;
   showStopButton(false);
-  setStatus('done', '完成');
+  if (!_stopped) setStatus('done', '完成');
+  _stopped = false;  // 重置，下一轮可用
 }
 
 // ====== Rebuild message from messageBlocks ======
@@ -983,7 +985,7 @@ function handleLiveStatus(st) {
 
 async function stopGeneration() {
   if (!currentRequestId) return;
-  // 1) 前端立即中断 fetch 流
+  _stopped = true;
   if (abortController) abortController.abort();
   showStopButton(false);
   setStatus('stopped', '已停止');
