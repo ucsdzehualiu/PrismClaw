@@ -11,6 +11,7 @@
 import asyncio
 import json
 import os
+from collections import defaultdict
 from datetime import datetime
 from typing import List
 
@@ -52,6 +53,9 @@ async def run_shell(command: str, timeout: int = 300, shell: str = "powershell")
 
     shell = (shell or "powershell").strip().lower()
 
+    # 软提示：记录重复调用，但不阻止执行
+    _repeat_note = _note_repeat("run_shell", f"{shell}:{command}")
+
     if shell == "bash":
         if not os.path.isfile(_GIT_BASH):
             return ToolResponse(content=[TextBlock(type="text", text=(
@@ -78,32 +82,21 @@ async def run_shell(command: str, timeout: int = 300, shell: str = "powershell")
         returncode = proc.returncode
     except asyncio.TimeoutError:
         returncode = -1
-        # 杀整棵进程树（Windows: taskkill /T /F /PID），防孙子进程占管道
         try:
-            await asyncio.create_subprocess_exec(
-                "taskkill", "/T", "/F", "/PID", str(proc.pid),
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-        except Exception:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
-        # communicate 加超时，孙子占管道时不永久挂起
-        try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=5)
+            proc.terminate()
+            stdout, stderr = await proc.communicate()
             stdout_str = stdout.decode("utf-8", "replace")
             stderr_str = stderr.decode("utf-8", "replace")
-        except (asyncio.TimeoutError, ProcessLookupError, Exception):
+        except ProcessLookupError:
             stdout_str, stderr_str = "", ""
         stderr_str = (stderr_str + "\n" if stderr_str else "") + \
-            f"TimeoutError: 命令执行超过 {timeout} 秒，已终止进程树。"
+            f"TimeoutError: 命令执行超过 {timeout} 秒。"
 
     text = (
         f"<returncode>{returncode}</returncode>"
         f"<stdout>{stdout_str}</stdout>"
         f"<stderr>{stderr_str}</stderr>"
+        f"{_repeat_note}"
     )
     return ToolResponse(content=[TextBlock(type="text", text=text)])
 
@@ -139,10 +132,9 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismClaw，一个透明、高效的 AI �
 - 并行优先：无依赖的操作必须并发
 - 调用前检查参数完整性和合法性
 - 组合使用多个工具完成复杂任务
-- **严禁重复重试（铁规则）**：同一 URL 的 `web_fetch` / 同一 query 的 `web_search` **只能调用一次**。改变 `max_chars` 不算"不同请求"。工具返回「已抓取过/禁止重复」后，**不得以任何理由再次调用**，必须基于已有结果继续或告知用户失败
+- **避免无意义重复**：同一 URL / query 已经成功获取结果的，优先基于已有结果继续，不要换词再搜同一主题。如果确实因为超时/不完整需要重试，可以再调一次。工具返回结果末尾会附重复提醒。
 - **拿到结果就停**：工具返回了有效数据后，**立即停止调用工具**，直接整理回复用户。不要「确认一下」、「再看一遍」——已经有结果了还看什么？
-- **禁止用不同query搜同一主题**：搜索结果已返回的，换词再搜不会得到不同答案，立即基于已有结果继续。
-- 工具调用硬上限：单轮最多 {max_iters} 步，超限自动终止，确保你的每步都必要且不可跳过
+- 工具调用硬上限：单轮最多 20 步，超限自动终止
 
 ## 响应风格
 - 简洁有力���结论先行
@@ -150,6 +142,12 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismClaw，一个透明、高效的 AI �
 - 代码块标注语言
 
 {extra_prompt}
+
+## 可用技能 (Skills)
+
+以下是技能清单（仅名称和描述）。当用户需求匹配某个技能时，先用 `view_text_file` 读取对应 `SKILL.md` 获取完整执行指令，再按指令执行。不要凭描述猜流程。
+
+{skills_section}
 
 ### 📥 下载与安装
 - `download_file(url, save_name)` — 下载任意网络文件到 `workspace/downloads/`（受控，会请求确认）。
@@ -184,26 +182,54 @@ def load_persona_file(filename: str, workspace_dir: str = "workspace") -> str:
         return "(未定义)"
 
 
-def format_system_prompt(
-    extra_prompts: List[str],
-    workspace_dir: str = "workspace",
-    max_iters: int = 30,
-) -> str:
-    """生成完整的 System Prompt，注入人格定义。
+def load_skills(workspace_dir: str = "workspace") -> str:
+    """扫描 workspace/skills/，只加载技能元数据（name + description）进 prompt。
 
-    技能清单不在此注入——交给官方 Toolkit.register_agent_skill +
-    ReActAgent.sys_prompt property 自动拼接，避免双重注入。
-    max_iters 从 config 注入，与 agent 实际上限对齐。
+    渐进式加载：prompt 里只放一行描述，不塞正文。
+    模型判断要用哪个 skill 时，用 view_text_file 读 SKILL.md 的完整正文。
     """
+    import re
+    skills_dir = os.path.join(workspace_dir, "skills")
+    if not os.path.isdir(skills_dir):
+        return "(无可用技能)"
+
+    parts = []
+    for name in sorted(os.listdir(skills_dir)):
+        skill_md = os.path.join(skills_dir, name, "SKILL.md")
+        if not os.path.isfile(skill_md):
+            continue
+        try:
+            with open(skill_md, "r", encoding="utf-8") as f:
+                text = f.read()
+            # 提取 frontmatter 里的 name 和 description
+            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, flags=re.DOTALL)
+            desc = ""
+            if fm_match:
+                fm = fm_match.group(1)
+                d_match = re.search(r"^description:\s*(.+?)$", fm, re.MULTILINE)
+                if d_match:
+                    desc = d_match.group(1).strip().strip("'\"")
+            if not desc:
+                desc = "(无描述)"
+            parts.append(f"- **{name}**: {desc}  → 用 `view_text_file` 读 `workspace/skills/{name}/SKILL.md` 获取完整指令")
+        except Exception:
+            pass
+
+    return "\n".join(parts) if parts else "(无可用技能)"
+
+
+def format_system_prompt(extra_prompts: List[str], workspace_dir: str = "workspace") -> str:
+    """生成完整的 System Prompt，注入人格定义 + 技能正文。"""
     agents_md = load_persona_file("AGENTS.md", workspace_dir)
     soul_md = load_persona_file("SOUL.md", workspace_dir)
     user_md = load_persona_file("USER.md", workspace_dir)
+    skills_section = load_skills(workspace_dir)
     return AGENT_SYS_PROMPT_TEMPLATE.format(
         agents_md=agents_md,
         soul_md=soul_md,
         user_md=user_md,
+        skills_section=skills_section,
         extra_prompt="\n".join(extra_prompts),
-        max_iters=max_iters,
     )
 
 
@@ -360,6 +386,18 @@ def _html_to_text(html: str) -> str:
     return html.strip()
 
 
+# ---- 防重复调用（软提示：不阻止，只追加提醒。AgentScope 风格——靠上下文历史让 LLM 自己判断） ----
+_call_counts = defaultdict(int)  # (tool_name, param_key) → 次数
+
+
+def _note_repeat(tool_name: str, param_key: str) -> str:
+    """记录调用次数。超过 1 次返回提醒文字（不阻止执行），首次返回空串。"""
+    _call_counts[(tool_name, param_key)] += 1
+    if _call_counts[(tool_name, param_key)] > 1:
+        return f"\n[提醒] 已第 {_call_counts[(tool_name, param_key)] - 1} 次重复调用 {tool_name}，请基于已有上下文判断是否必要。"
+    return ""
+
+
 async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
     """抓取一个网页，返回正文文本（HTML 转纯文本，国内可直连）。
 
@@ -375,6 +413,9 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
     url = (url or "").strip()
     if not url or not url.startswith(("http://", "https://")):
         return ToolResponse(content=[TextBlock(type="text", text="错误：请提供合法的 http/https 网址。")])
+
+    # 软提示：记录重复调用，但不阻止执行
+    _repeat_note = _note_repeat("web_fetch", normalized_url)
 
     # GitHub 仓库链接 → 用 GitHub API 一次性获取 README
     gh_repo = re.match(r"https?://github\.com/([^/]+)/([^/]+)/?$", url)
@@ -394,9 +435,9 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
                         if len(readme_text) > max_chars:
                             readme_text = readme_text[:max_chars] + f"\n\n...(已截断)"
                         return ToolResponse(content=[TextBlock(type="text", text=(
-                            f"来源（GitHub API - {owner}/{repo} README）：\n\n{readme_text}"
+                            f"来源（GitHub API - {owner}/{repo} README）：\n\n{readme_text}{_repeat_note}"
                         ))])
-                    return ToolResponse(content=[TextBlock(type="text", text=f"GitHub API 返回 HTTP {resp.status}。")])
+                    return ToolResponse(content=[TextBlock(type="text", text=f"GitHub API 返回 HTTP {resp.status}。{_repeat_note}")])
         except Exception as e:
             return ToolResponse(content=[TextBlock(type="text", text=f"GitHub API 请求失败：{e}")])
 
@@ -413,7 +454,7 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n\n...(已截断，原文共 {len(text)} 字)"
         return ToolResponse(content=[TextBlock(type="text", text=(
-            f"来源：{url}\n\n{text}" if text else f"来源：{url}\n\n（页面无可见正文）"
+            f"来源：{url}\n\n{text}{_repeat_note}" if text else f"来源：{url}\n\n（页面无可见正文）{_repeat_note}"
         ))])
     except Exception as e:
         return ToolResponse(content=[TextBlock(type="text", text=f"抓取出错：{e}")])
@@ -493,22 +534,25 @@ async def web_search(query: str) -> ToolResponse:
     if not query:
         return ToolResponse(content=[TextBlock(type="text", text="错误：搜索词为空。")])
 
+    # 软提示：记录重复调用，但不阻止执行
+    _repeat_note = _note_repeat("web_search", query)
+
     # 1) 天气类 → 直连天气 API（真实数据）
     if re.search(r"天气|气温|温度|weather|temperature|多少度|穿衣|紫外线", query, re.I):
         city = _extract_city(query)
         if city:
             weather = await _fetch_weather(city)
             if weather:
-                return ToolResponse(content=[TextBlock(type="text", text=weather)])
+                return ToolResponse(content=[TextBlock(type="text", text=weather + _repeat_note)])
 
     # 2) 通用搜索 → 必应中国（国内可直连）
     results = await _bing_cn_search(query)
     if results:
-        return ToolResponse(content=[TextBlock(type="text", text=results)])
+        return ToolResponse(content=[TextBlock(type="text", text=results + _repeat_note)])
 
     # 3) 兜底：LLM 常识
     answer = await _llm_fallback(query)
-    return ToolResponse(content=[TextBlock(type="text", text=answer)])
+    return ToolResponse(content=[TextBlock(type="text", text=answer + _repeat_note)])
 
 
 # ---- 技能安装边界说明（诚实告知，不假装能装市场技能） ----
@@ -568,6 +612,7 @@ async def manage_skill(
     if action == "list":
         if not os.path.isdir(skills_dir):
             return ToolResponse(content=[TextBlock(type="text", text="当前没有已安装的本地技能。")])
+            return
         items = []
         for d in sorted(os.listdir(skills_dir)):
             p = os.path.join(skills_dir, d)
@@ -579,15 +624,19 @@ async def manage_skill(
             ))])
         else:
             return ToolResponse(content=[TextBlock(type="text", text="workspace/skills 下暂无技能目录。")])
+        return
 
     if action == "info":
         return ToolResponse(content=[TextBlock(type="text", text=SKILL_INSTALL_INFO)])
+        return
 
     if action == "create":
         if not name:
             return ToolResponse(content=[TextBlock(type="text", text="错误：create 动作需要提供 name（技能名，仅英文/数字/下划线/连字符）。")])
+            return
         if not re.match(r"^[a-zA-Z0-9_-]+$", name):
             return ToolResponse(content=[TextBlock(type="text", text="错误：技能名只能包含字母、数字、下划线和连字符。")])
+            return
         target = os.path.join(skills_dir, name)
         os.makedirs(target, exist_ok=True)
         skill_md = os.path.join(target, "SKILL.md")
@@ -602,6 +651,7 @@ async def manage_skill(
             ))])
         except Exception as e:
             return ToolResponse(content=[TextBlock(type="text", text=f"创建技能失败：{e}")])
+        return
 
     return ToolResponse(content=[TextBlock(type="text", text=f"未知 action: {action}。支持 list / create / info。")])
 
@@ -624,6 +674,7 @@ async def download_file(
     url = (url or "").strip()
     if not url or not url.startswith(("http://", "https://")):
         return ToolResponse(content=[TextBlock(type="text", text="错误：请提供合法的 http/https 下载地址。")])
+        return
 
     # 推断文件名
     if not save_name:
@@ -635,6 +686,7 @@ async def download_file(
     save_path = os.path.join(save_dir, save_name)
     if os.path.exists(save_path):
         return ToolResponse(content=[TextBlock(type="text", text=f"文件已存在：{save_path}（未覆盖）。")])
+        return
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -643,6 +695,7 @@ async def download_file(
             ) as resp:
                 if resp.status != 200:
                     return ToolResponse(content=[TextBlock(type="text", text=f"下载失败：HTTP {resp.status}。")])
+                    return
                 size = 0
                 with open(save_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(8192):
