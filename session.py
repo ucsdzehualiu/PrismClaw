@@ -57,6 +57,7 @@ class AgentRequest:
     session_id: str = ""
     content: Any = None
     canceled: bool = False
+    _cancel_q: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         self.response_queue: asyncio.Queue = asyncio.Queue()
@@ -64,6 +65,13 @@ class AgentRequest:
 
     async def cancel(self):
         self.canceled = True
+        # 直接往 streaming 内部队列灌 cancel 事件，不等 LLM 流式走到检查点
+        if self._cancel_q is not None:
+            try:
+                self._cancel_q.put_nowait({"cancel": True, "last": True, "contents": []})
+                self._cancel_q.put_nowait(None)
+            except Exception:
+                pass
         if self.stream_task and not self.stream_task.done():
             self.stream_task.cancel()
 

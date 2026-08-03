@@ -495,6 +495,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                     await q.put(None)
 
             request.stream_task = asyncio.create_task(streaming())
+            request._cancel_q = q  # 取消时直接往这里灌 cancel 事件，不等 LLM 迭代
             while True:
                 msg = await q.get()
                 await response_q.put(msg)
