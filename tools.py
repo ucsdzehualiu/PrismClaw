@@ -37,14 +37,14 @@ from conf import FLAGS
 _GIT_BASH = r"C:\Program Files\Git\bin\bash.exe"
 
 
-async def run_shell(command: str, timeout: int = 300, shell: str = "powershell") -> ToolResponse:
+async def run_shell(command: str, timeout: int = 120, shell: str = "powershell") -> ToolResponse:
     """执行一条命令并返回 returncode / stdout / stderr。
 
     运行环境是 Windows。默认走 **PowerShell**；安装脚本等 bash 内容用 shell="bash"（Git Bash）。
 
     Args:
         command: 命令字符串（按 shell 语法）
-        timeout: 超时秒数（默认 300）
+        timeout: 超时秒数（默认 120）
         shell: "powershell"（默认）或 "bash"
     """
     command = (command or "").strip()
@@ -160,6 +160,7 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismClaw，一个透明、高效的 AI �
 - **铁规则**：bash 语法（`while [[ ]]`、`$#`、`set -euo pipefail` 等）**绝不**塞进 PowerShell，反之亦然。拿到 `.sh` 脚本 → `run_shell("bash 脚本路径", shell="bash")`。
 - **不要发空命令**。`command` 必须是有内容的完整命令。
 - **安装前先检查**（重要）：执行任何安装/下载命令前，先检查目标是否已存在（如 `node_modules/` 目录、`pip show`、`npm ls` 等）。已存在且可用的直接告诉用户，不要重复安装。
+- **非交互模式**：所有 install/uninstall 命令必须带确认标志，否则会卡住等待输入。`pip install/uninstall` 加 `-y`，`conda install/uninstall` 加 `-y`，`npm install/uninstall` 一般不需要额外标志。
 
 ## 人格设定
 
