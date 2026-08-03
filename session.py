@@ -71,7 +71,7 @@ class AgentRequest:
 class Session:
     """单个会话，管理请求队列和 pending 工具。"""
 
-    def __init__(self, session_id: str, expires: float = 300):
+    def __init__(self, session_id: str, expires: float = 1800):
         self.session_id = session_id
         self.lock = asyncio.Lock()
         self.cond = asyncio.Condition(self.lock)
@@ -160,7 +160,7 @@ class Session:
 class SessionManager:
     """全局会话管理器。"""
 
-    def __init__(self, expires: float = 300):
+    def __init__(self, expires: float = 1800):
         self.manager_lock = asyncio.Lock()
         self.sessions: Dict[str, Session] = {}
         self.expires = expires
@@ -172,6 +172,12 @@ class SessionManager:
         session_main: Optional[Callable] = None,
     ) -> Optional[Session]:
         async with self.manager_lock:
+            existing = self.sessions.get(session_id)
+            # 会话已过期 → 清理旧会话，重建新会话
+            if existing and existing.status == SessionStatus.INACTIVE and create:
+                await existing.release()
+                del self.sessions[session_id]
+                existing = None
             if session_id not in self.sessions and create:
                 self.sessions[session_id] = Session(session_id, expires=self.expires)
                 if session_main:
