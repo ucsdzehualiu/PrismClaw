@@ -15,6 +15,22 @@
 
 ## 快速开始
 
+### 1. 配置 LLM
+
+```bash
+# 从模板创建配置文件
+cp config.example.yaml config.yaml
+
+# 编辑 config.yaml，填入你的 API 信息
+# 目前支持 OpenAI 兼容接口，示例：
+#   - 阿里云百炼：api_base 填 maas 地址，model 填 qwen3.6-35b-a3b
+#   - 本地 vLLM：api_base 填内网地址，model 填你的模型名
+```
+
+**config.yaml 不会被提交到 Git**（已在 .gitignore 中），仓库只保留 `config.example.yaml` 模板。
+
+### 2. 启动
+
 ```bash
 # 方式一：双击启动（推荐，Windows）
 双击 launch.bat
@@ -62,7 +78,8 @@ python server.py
 ### 启动与配置
 - `launch.bat` — Windows 启动器，清理上一轮残留后再启动，端口就绪后自动开浏览器。
 - `cleanup.py` — 清理脚本，杀掉 8765 端口旧进程 + 删 `__pycache__`。
-- `config.yaml` — 运行配置（模型、迭代上限、上下文预算、服务端口等）。
+- `config.example.yaml` — 配置文件模板，复制为 `config.yaml` 后填入你的 API Key。
+- `config.yaml` — 运行配置（**不提交到 Git**，含 API Key）。
 - `conf.py` — 功能开关，含 HITL 确认工具列表 `GUARD_TOOLS` 与超时 `GUARD_TIMEOUT`。
 - `model_config.py` — 基于 AgentScope `OpenAIChatModel` 构建模型实例。
 - `requirements.txt` — Python 依赖。
