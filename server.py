@@ -23,6 +23,10 @@ from prismclaw_agent import get_or_create_agent, SESS_MGR
 from model_config import load_config
 from tools import load_persona_file
 
+# 项目根目录：无论从哪里启动 server，都定位到 server.py 所在目录
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+WORKSPACE_DIR = os.path.join(BASE_DIR, "workspace")
+
 
 class ChatRequest(BaseModel):
     session_id: str = "default"
@@ -69,7 +73,7 @@ async def update_persona(request: Request):
     filename = FILE_MAP.get(target)
     if not filename:
         return {"status": "error", "message": f"unknown target: {target}"}
-    filepath = os.path.join("workspace", filename)
+    filepath = os.path.join(WORKSPACE_DIR, filename)
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
     with open(filepath, "w", encoding="utf-8") as f:
         f.write(content)
@@ -80,7 +84,7 @@ async def update_persona(request: Request):
 async def chat(request: ChatRequest):
     queue_ok = False
     for _ in range(3):
-        sess = await get_or_create_agent(request.session_id)
+        sess = await get_or_create_agent(request.session_id, workspace_dir=WORKSPACE_DIR)
         from session import AgentRequest
         agent_req = AgentRequest(
             session_id=request.session_id,

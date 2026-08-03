@@ -593,6 +593,7 @@ async def manage_skill(
     name: str = "",
     description: str = "",
     content: str = "",
+    workspace_dir: str = "workspace",
 ) -> ToolResponse:
     """技能管理工具（PrismClaw 原生，用于化解"装 skill"类未知请求）。
 
@@ -608,7 +609,6 @@ async def manage_skill(
         content: 技能正文（create 时的 SKILL.md 内容；留空则按模板生成）
     """
     action = (action or "").strip().lower()
-    workspace_dir = "workspace"
     skills_dir = os.path.join(workspace_dir, "skills")
 
     if action == "list":
@@ -770,7 +770,8 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
 
     # 技能管理（化解"装 skill"类未知请求；list/create/info 均为安全动作，不走 HITL 确认）
     if FLAGS.get("enable_skills", True):
-        toolkit.register_tool_function(manage_skill)
+        import functools
+        toolkit.register_tool_function(functools.partial(manage_skill, workspace_dir=workspace_dir))
 
     # 下载 + 从 URL 安装技能（受控文件访问，走 HITL 确认）
     if FLAGS.get("enable_download", True):
