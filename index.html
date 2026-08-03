@@ -565,15 +565,15 @@ function renderConfirmCard(asstId, detail) {
       <button class="btn" onclick="sendMagic('/approve_all')" style="background:var(--success);color:#fff">⚡ 允许全部</button>
       <button class="btn" onclick="sendMagic('/reject')">✕ 拒绝</button>
     </div>`;
-  // 贴到最近一个 loading tool card 后面
+  // 贴到最近一个 tool card 后面（不限"执行中"状态——guard 可能已改为"等待确认"）
   const toolCards = div.querySelectorAll('.tool-card:not(.confirm-card)');
-  let anchor = null;
-  for (let i = toolCards.length - 1; i >= 0; i--) {
-    const r = toolCards[i].querySelector('[id$="-result"]');
-    if (r && r.textContent.includes('执行中')) { anchor = toolCards[i]; break; }
+  if (toolCards.length > 0) {
+    const anchor = toolCards[toolCards.length - 1];
+    if (anchor.nextSibling) div.insertBefore(card, anchor.nextSibling);
+    else div.appendChild(card);
+  } else {
+    div.appendChild(card);
   }
-  if (anchor && anchor.nextSibling) div.insertBefore(card, anchor.nextSibling);
-  else div.appendChild(card);
   scrollChat();
 }
 
@@ -597,18 +597,12 @@ function maybeRenderConfirm(asstId, content) {
       <button class="btn" onclick="sendMagic('/reject')">✕ 拒绝</button>
     </div>`;
 
-  // 找最近一个 loading 状态的 tool card，插到它后面；找不到才退回气泡末尾
+  // 贴到最近一个 tool card 后面
   const toolCards = div.querySelectorAll('.tool-card:not(.confirm-card)');
-  let anchor = null;
-  for (let i = toolCards.length - 1; i >= 0; i--) {
-    const tc = toolCards[i];
-    const resultEl = tc.querySelector('[id$="-result"]');
-    if (resultEl && resultEl.textContent.includes('执行中')) { anchor = tc; break; }
-  }
-  if (anchor && anchor.nextSibling) {
-    div.insertBefore(card, anchor.nextSibling);
-  } else if (anchor) {
-    div.appendChild(card);
+  if (toolCards.length > 0) {
+    const anchor = toolCards[toolCards.length - 1];
+    if (anchor.nextSibling) div.insertBefore(card, anchor.nextSibling);
+    else div.appendChild(card);
   } else {
     div.appendChild(card);
   }

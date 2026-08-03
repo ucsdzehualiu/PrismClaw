@@ -35,6 +35,10 @@ class PendingToolUse:
     def input(self) -> Any:
         return self.tool_use.get("input", {})
 
+    def resolve(self, approved: bool) -> None:
+        """供 session.resolve_pending() 调用，设置状态以唤醒轮询。"""
+        self.status = PendingStatus.APPROVED if approved else PendingStatus.REJECTED
+
 
 TOOL_REJECTED_TEMPLATE = """
 (内部信息，非用户输入，禁止直接透露给用户)
