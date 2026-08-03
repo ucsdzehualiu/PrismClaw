@@ -28,7 +28,8 @@ class SystemBlock:
     """System Prompt 的一个分块。"""
     name: str = ""
     chars: int = 0
-    preview: str = ""
+    preview: str = ""   # 截断预览（用于 Markdown 日志）
+    content: str = ""   # 完整正文（用于前端展示）
 
 
 @dataclass
@@ -183,6 +184,7 @@ class ContextViz:
                             name=cur_name,
                             chars=len(text),
                             preview=text[:200] + ("..." if len(text) > 200 else ""),
+                            content=text,
                         ))
                     cur_buf = []
                 cur_name = seg.lstrip("# ").strip()
@@ -195,6 +197,7 @@ class ContextViz:
                     name=cur_name,
                     chars=len(text),
                     preview=text[:200] + ("..." if len(text) > 200 else ""),
+                    content=text,
                 ))
         return blocks
 
@@ -300,7 +303,7 @@ class ContextViz:
             "timestamp": c.timestamp,
             "user_input": c.user_input,
             "system_blocks": [
-                {"name": b.name, "chars": b.chars, "preview": b.preview}
+                {"name": b.name, "chars": b.chars, "preview": b.preview, "content": b.content}
                 for b in c.system_blocks
             ],
             "messages": [

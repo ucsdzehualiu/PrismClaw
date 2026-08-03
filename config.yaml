@@ -10,7 +10,7 @@ llm:
 providers:
   dsv4-local:
     api_key: "EMPTY"
-    api_base: "http://YOUR_MODEL_HOST:8900/v1"  # 本地运行改回你的模型服务地址
+    api_base: "http://36.134.97.115:8900/v1"
     model: "dsv4"
     enable_thinking: false
 

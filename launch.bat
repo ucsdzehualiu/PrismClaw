@@ -9,10 +9,10 @@ echo.
 
 cd /d "%~dp0"
 
-REM ---- 激活 conda 环境（如果可用），否则用系统 python ----
-where conda >nul 2>&1
-if not errorlevel 1 (
-    call conda activate ai-course >nul 2>&1
+REM ---- 激活 conda 环境（否则 python 可能被 WindowsApps 空壳劫持）----
+call C:\ProgramData\miniconda3\Scripts\activate.bat ai-course >nul 2>&1
+if errorlevel 1 (
+    echo [!] conda not found, trying system python...
 )
 set "PYTHON=python"
 

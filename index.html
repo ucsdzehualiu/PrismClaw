@@ -344,7 +344,6 @@ async function sendMessage() {
     const reader = resp.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let gotDoneEvent = false;  // 后端真正推了 phase:done 才算完成
 
     while (true) {
       const { done, value } = await reader.read();
@@ -374,7 +373,6 @@ async function sendMessage() {
           if (event.type === 'status' || (event.data && event.data.type === 'status')) {
             const st = event.data || event;
             handleLiveStatus(st);
-            if (st.phase === 'done') gotDoneEvent = true;  // 后端确认完成
             // guard 发的专门确认事件 → 直接渲染卡片，不靠文本猜
             if (st.phase === 'confirm') {
               renderConfirmCard(asstId, st.detail || '');
@@ -407,9 +405,8 @@ async function sendMessage() {
           }
 
           if (event.last) {
-            // is_last_chunk 只表示"当前这条流式消息的最后一块"，不是整个回复结束。
-            // agent 后面可能还要调工具、继续推理。真正的结束由后端 phase:"done" 事件处理。
-            // 这里什么都不做，避免过早把状态置成"完成"。
+            // Don't break — context_view and other events may follow in same buffer
+            setStatus('done', '完成');
           }
         } catch (e) { /* skip parse errors */ }
       }
@@ -428,12 +425,7 @@ async function sendMessage() {
 
   sendBtn.disabled = false;
   showStopButton(false);
-  // 只有后端真正推了 phase:done 才设完成；否则流中断了（agent 可能还在跑）
-  if (gotDoneEvent) {
-    setStatus('done', '完成');
-  } else {
-    setStatus('thinking', '后台继续');
-  }
+  setStatus('done', '完成');
 }
 
 // ====== Rebuild message from messageBlocks ======
@@ -623,8 +615,9 @@ function maybeRenderConfirm(asstId, content) {
   scrollChat();
 }
 
-// 发送 /approve 或 /reject —— 走轻量 /resolve 端点，不开新 SSE 流、不 abort 原流。
-// agent 后续输出继续从触发确认的那个原请求的 SSE 流出来。
+// 发送 /approve 或 /reject —— 走 /chat（和正常消息一样）。
+// approve 是正常请求：handle_magic_command 改 pending 状态，
+// 然后这个请求的 agent reply 会读到 APPROVED 并重放工具执行。
 async function sendMagic(cmd) {
   const text = cmd.trim();
   if (!text) return;
@@ -634,24 +627,60 @@ async function sendMagic(cmd) {
     c.style.pointerEvents = 'none';
     c.querySelectorAll('button').forEach(b => b.remove());
   });
-  const approved = text === '/approve' || text === '/approve_all';
-  // /approve_all 额外开启自动放行
-  if (text === '/approve_all') {
-    try { await fetch('/resolve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SESSION_ID,approved:true,auto_approve:true})}); } catch(e){}
-    return;
-  }
-  if (text === '/approve_all off') {
-    try { await fetch('/resolve', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session_id:SESSION_ID,approved:false,auto_approve_off:true})}); } catch(e){}
-    return;
-  }
-  // /approve 或 /reject：只 resolve，原 SSE 流继续输出
+  // 复用当前气泡：设置输入框后直接发 SSE，不建新用户消息
+  setStatus('thinking', '思考中');
+  showStopButton(true);
+  if (abortController) abortController.abort();
+  abortController = new AbortController();
   try {
-    await fetch('/resolve', {
+    const resp = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session_id: SESSION_ID, approved: approved }),
+      body: JSON.stringify({ session_id: SESSION_ID, content: [{ type: 'text', text }] }),
+      signal: abortController.signal,
     });
-  } catch (e) { console.warn('[resolve] failed', e); }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        try {
+          const event = JSON.parse(line.slice(6));
+          if (event.request_id) { currentRequestId = event.request_id; continue; }
+          if (event.type === 'status' || (event.data && event.data.type === 'status')) {
+            const st = event.data || event;
+            handleLiveStatus(st);
+            if (st.phase === 'confirm') {
+              renderConfirmCard(lastAsstId, st.detail || '');
+            }
+            continue;
+          }
+          if (event.contents && Array.isArray(event.contents)) {
+            const msgId = event.msg_id || 'msg0';
+            messageBlocks.set(msgId, event.contents);
+            if (!messageIdOrder.includes(msgId)) messageIdOrder.push(msgId);
+            // magic 命令结果直接推到最后一条 assistant 气泡
+            if (lastAsstId && lastAsstMsg) rebuildAssistantMessage(lastAsstId, lastAsstMsg);
+          }
+          if (event.type === 'context_view' || (event.data && event.data.type === 'context_view')) {
+            updateContextView(event.data || event);
+            continue;
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (err) {
+    if (err.name !== 'AbortError') console.error('[magic]', err.message);
+  }
+  showStopButton(false);
+  setStatus('done', '完成');
 }
 
 function addToolCard(asstId, tc) {
@@ -709,7 +738,7 @@ function updateToolCard(tc) {
         }).join('\n');
       }
     } catch(e) { /* not JSON, keep as is */ }
-    resultEl.textContent = '✅ 结果: ' + (output || '(空)').substring(0, 500);
+    resultEl.textContent = '✅ 结果: ' + (output || '(空)');
   }
   scrollChat();
 }
@@ -780,7 +809,7 @@ function updateContextView(data) {
       html += `<div style="background:var(--bg-card);border-radius:var(--radius-sm);padding:6px 10px;margin-bottom:4px;border-left:3px solid var(--orange);font-size:12px">
         <div style="color:var(--orange);font-weight:600">Step ${t.step}: ${escapeHtml(t.tool || t.tool_name || '')}</div>
         <div style="color:var(--text-dim);font-family:var(--font-mono);font-size:11px;margin-top:2px">参数: ${escapeHtml(params.substring(0, 150))}</div>
-        ${result ? `<div style="color:var(--success);font-size:11px;margin-top:2px">结果: ${escapeHtml(result.substring(0, 200))}</div>` : ''}
+        ${result ? `<div style="color:var(--success);font-size:11px;margin-top:2px">结果: ${escapeHtml(result)}</div>` : ''}
       </div>`;
     }
     html += `</div>`;
@@ -797,6 +826,20 @@ function updateContextView(data) {
     </div>`;
   }
 
+  // System Prompt 完整全文（LLM 实际收到）
+  if (data.full_system) {
+    html += `<div class="context-section">
+      <div class="section-title">📋 System Prompt 全文（LLM 实际收到）</div>
+      <div class="context-block">
+        <div class="block-header" onclick="this.parentElement.classList.toggle('open')">
+          <span>📄 完整 System Prompt</span>
+          <span class="size">${data.full_system.length.toLocaleString()}字</span>
+        </div>
+        <div class="block-body" style="max-height:500px">${escapeHtml(data.full_system)}</div>
+      </div>
+    </div>`;
+  }
+
   // System prompt blocks (collapsible)
   if (data.system_blocks && data.system_blocks.length) {
     html += `<div class="context-section">
@@ -807,7 +850,7 @@ function updateContextView(data) {
           <span>📄 ${escapeHtml(b.name)}</span>
           <span class="size">${b.chars?.toLocaleString()}字</span>
         </div>
-        <div class="block-body">${escapeHtml(b.preview || '')}</div>
+        <div class="block-body">${escapeHtml(b.content || b.preview || '')}</div>
       </div>`;
     }
     html += `</div>`;
@@ -875,7 +918,7 @@ function updateTimelineResult(tc) {
         output = parsed.map(i => typeof i === 'object' ? (i.text || i.content || JSON.stringify(i)) : String(i)).join('\n');
       }
     } catch(e) {}
-    detail.textContent = '结果: ' + output.substring(0, 200);
+    detail.textContent = '结果: ' + output;
   }
   const item = document.getElementById('tl-' + tc.id);
   if (item) item.classList.remove('active');
@@ -918,40 +961,29 @@ function showLiveStatus(show, text, cls) {
 function handleLiveStatus(st) {
   const phase = st.phase || '';
   const detail = st.detail || '';
-  // 更新工具栏实时状态条 + 主状态徽章（两者同步，避免主徽章卡在旧态）
+  // 更新工具栏实时状态条
   if (phase === 'thinking') {
     showLiveStatus(true, '🧠 思考中…', 'live');
-    setStatus('thinking', '思考中');
   } else if (phase === 'reasoning') {
     const preview = (st.preview || detail || '').slice(-60);
     showLiveStatus(true, '🧠 ' + preview, 'reasoning');
-    setStatus('thinking', '推理中');
   } else if (phase === 'acting') {
     showLiveStatus(true, '🔧 ' + detail, 'acting');
-    setStatus('acting', '执行中');
   } else if (phase === 'pending') {
     showLiveStatus(true, '🔒 待确认', 'pending');
-    setStatus('pending', '待确认');
   } else if (phase === 'confirm') {
     showLiveStatus(true, '🔒 待确认', 'pending');
-    setStatus('pending', '待确认');
   } else if (phase === 'heartbeat') {
     // 心跳：agent 还在工作，别让用户以为它死了
     showLiveStatus(true, '⏳ ' + detail, 'live');
   } else if (phase === 'max_iters') {
     showLiveStatus(true, '⚠️ ' + detail, 'pending');
-    setStatus('pending', '已达上限');
   } else if (phase === 'error') {
     showLiveStatus(true, '❌ ' + detail, 'pending');
-    setStatus('stopped', '出错');
   } else if (phase === 'paused') {
     showLiveStatus(true, '🔒 ' + detail, 'pending');
-    setStatus('pending', '已暂停');
   } else if (phase === 'done') {
     showLiveStatus(false);
-    setStatus('done', '完成');
-    // 1.5s 后复位为就绪（若没有新一轮请求在进行）
-    setTimeout(() => { if (!currentRequestId) setStatus('thinking', '就绪'); }, 1500);
   }
 }
 
