@@ -145,7 +145,9 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismClaw，一个透明、高效的 AI �
 
 ## 可用技能 (Skills)
 
-以下是技能清单（仅名称和描述）。当用户需求匹配某个技能时，先用 `view_text_file` 读取对应 `SKILL.md` 获取完整执行指令，再按指令执行。不要凭描述猜流程。
+以下是已安装的技能清单（仅名称和描述）。所有技能统一存放在 `workspace/skills/` 目录下，每个技能一个子文件夹，内含 `SKILL.md`。
+
+当用户需求匹配某个技能时，先用 `view_text_file` 读取 `workspace/skills/<技能名>/SKILL.md` 获取完整执行指令，再按指令执行。不要凭描述猜流程。
 
 {skills_section}
 
