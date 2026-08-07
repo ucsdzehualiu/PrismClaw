@@ -39,6 +39,88 @@ class PrismClawAgent(PrismClawGuardMixin, ReActAgent):
     pass
 
 
+def _prompt_content_to_text(content) -> str:
+    """把 OpenAI 格式消息的 content（str 或 list[block]）转成可读文本原样呈现。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict):
+                t = b.get("type", "")
+                if t == "text":
+                    parts.append(str(b.get("text", "")))
+                elif t == "tool_use":
+                    name = b.get("name", "")
+                    inp = _prompt_content_to_text(b.get("input", b.get("raw_input", "")))
+                    parts.append(f"[工具调用] {name} 参数: {inp}")
+                elif t == "tool_result":
+                    parts.append(f"[工具结果]\n{_prompt_content_to_text(b.get('output', b.get('content', '')))}")
+                else:
+                    parts.append(str(b))
+            else:
+                parts.append(str(b))
+        return "\n\n".join(p for p in parts if p)
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _prompt_to_readable(prompt) -> list:
+    """把将要发给 LLM 的 prompt（list[dict]，OpenAI 格式）整理成可展示结构。
+
+    不做任何过滤/改写，只把 content 块与 tool_calls 转成可读文本——上下文是怎么样就怎么样。
+    """
+    if not isinstance(prompt, list):
+        return []
+    out = []
+    for m in prompt:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "unknown")
+        text = _prompt_content_to_text(m.get("content"))
+        # OpenAI 函数调用：assistant 消息 content=null，工具调用放在 tool_calls 字段
+        tcs = m.get("tool_calls")
+        if tcs:
+            parts = []
+            for tc in tcs:
+                fn = tc.get("function", {})
+                parts.append(f"[工具调用] {fn.get('name', '')} 参数: {fn.get('arguments', '')}")
+            join = "\n\n".join(parts)
+            text = f"{text}\n\n{join}" if text else join
+        out.append({"role": role, "content": text})
+    return out
+
+
+class ModelContextProbe:
+    """包一层 model：每次真正调 LLM 前，把将要发送的上下文（原样）交给 sink 展示。
+
+    - __call__(prompt, **kwargs)：先把 prompt 交给 sink（前端展示 + viz 记录），再透传给真实模型。
+    - 其余属性（stream 等）透传到内层 model，不影响 AgentScope 原有行为。
+    """
+
+    def __init__(self, model, ctx_sink: dict):
+        object.__setattr__(self, "_probe_model", model)
+        object.__setattr__(self, "_probe_sink", ctx_sink)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_probe_model"), name)
+
+    def __setattr__(self, name, value):
+        # stream 等属性写到内层 model，让 AgentScope 的开关逻辑照常生效
+        setattr(object.__getattribute__(self, "_probe_model"), name, value)
+
+    async def __call__(self, prompt, **kwargs):
+        sink = object.__getattribute__(self, "_probe_sink")
+        emit = sink.get("emit")
+        if emit is not None:
+            try:
+                await emit(prompt)
+            except Exception:
+                pass  # 展示失败不能影响主流程
+        return await object.__getattribute__(self, "_probe_model")(prompt, **kwargs)
+
+
 # ---- Agent 生命周期 ----
 
 async def register_reasoning_hint(agent: ReActAgent):
@@ -151,10 +233,13 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     toolkit = await build_toolkit(workspace_dir)
     system_prompt = format_system_prompt([], workspace_dir)
     model = build_model(cfg, stream=True)
+    # 包一层 model：每次真正调 API 前，把将要发送的上下文（原样）推向前端透明展示。
+    # ctx_sink 是会话级可变对象，每轮请求把 emit 指到当轮 SSE 流（见下方 streaming）。
+    ctx_sink: dict = {}
     agent = PrismClawAgent(
         name="PrismClaw",
         sys_prompt=system_prompt,
-        model=model,
+        model=ModelContextProbe(model, ctx_sink),
         formatter=OpenAIChatFormatter(),
         toolkit=toolkit,
         memory=InMemoryMemory(),
@@ -207,6 +292,12 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                 user_text = request.content
             viz.start_round(user_text)
 
+            # OpenClaw 式：每轮与 LLM 交互前，从当前文件重建 system prompt（persona/技能/画像），
+            # 并热更新到 agent —— 改 USER.md/AGENTS.md/SOUL.md 后下一轮立即真实生效；
+            # 配合上下文探头，右侧光谱面板展示的也正是这份最新实际发送的 system prompt。
+            system_prompt = format_system_prompt([], workspace_dir)
+            agent._sys_prompt = system_prompt
+
             # 估算 System Prompt tokens（CJK 友好：每字 ~1 token）
             sys_chars = len(system_prompt)
             sys_tokens_est = sys_chars  # CJK 简化估算
@@ -214,6 +305,27 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             inputs = Msg(name="user", content=request.content, role="user")
 
             q = asyncio.Queue()
+
+            # 把"本轮真正发送给 LLM 的上下文"灌进右侧光谱面板。
+            # ModelContextProbe 每次调 API 前会回调 emit，构造 context_view 事件实时刷新面板，
+            # full_messages 用真实 prompt 全量（不截断），一轮内多次调 API 会更新同一个轮块。
+            async def emit_context(prompt):
+                readable = _prompt_to_readable(prompt)
+                await q.put({
+                    "type": "context_view",
+                    "data": {
+                        "round": viz.round_num,
+                        "timestamp": datetime.now().isoformat(),
+                        "user_input": user_text,
+                        "full_messages": [
+                            {"role": m["role"], "content": m["content"], "chars": len(m["content"])}
+                            for m in readable
+                        ],
+                    },
+                    "msg_id": "ctx",
+                })
+            ctx_sink["emit"] = emit_context
+
             async def streaming():
                 step = 0
                 tool_id_to_step = {}  # tool_use_id → step number

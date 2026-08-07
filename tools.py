@@ -418,7 +418,7 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
         return ToolResponse(content=[TextBlock(type="text", text="错误：请提供合法的 http/https 网址。")])
 
     # 软提示：记录重复调用，但不阻止执行
-    _repeat_note = _note_repeat("web_fetch", normalized_url)
+    _repeat_note = _note_repeat("web_fetch", url)
 
     # GitHub 仓库链接 → 用 GitHub API 一次性获取 README
     gh_repo = re.match(r"https?://github\.com/([^/]+)/([^/]+)/?$", url)

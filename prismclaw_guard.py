@@ -8,12 +8,13 @@
 - approve/reject 只改 pending.status，下一轮 _reasoning 自然读到
 """
 
+import time
 import uuid
 from typing import Any, Optional
 
 from agentscope.message import Msg, ToolUseBlock, ToolResultBlock, TextBlock
 
-from conf import GUARD_TOOLS
+from conf import GUARD_TOOLS, GUARD_TIMEOUT
 
 
 class PendingStatus:
@@ -26,6 +27,7 @@ class PendingToolUse:
     def __init__(self, tool_use: dict):
         self.tool_use = tool_use
         self.status = PendingStatus.PENDING
+        self.created_at = time.time()
 
     @property
     def name(self) -> str:
@@ -34,6 +36,10 @@ class PendingToolUse:
     @property
     def input(self) -> Any:
         return self.tool_use.get("input", {})
+
+    def is_expired(self, timeout: float) -> bool:
+        """等待超过 timeout 秒仍未确认 → 视为超时（仅在 status==PENDING 时判断）。"""
+        return time.time() - self.created_at > timeout
 
     def resolve(self, approved: bool) -> None:
         """供 session.resolve_pending() 调用，设置状态以唤醒轮询。"""
@@ -59,6 +65,11 @@ class PrismClawGuardMixin:
 
             if not pending:
                 return await super()._reasoning(tool_choice)
+
+            # 超时兜底：pending 等待超过 GUARD_TIMEOUT 仍无人确认 → 自动按拒绝处理，
+            # 走下方 REJECTED 分支 pop 掉并通知模型，避免 stale 确认卡永久卡住后续对话。
+            if pending.status == PendingStatus.PENDING and pending.is_expired(GUARD_TIMEOUT):
+                pending.status = PendingStatus.REJECTED
 
             tool_name = pending.name
             tool_input = pending.input

@@ -749,12 +749,19 @@ function updateContextView(data) {
   contextData.style.display = 'block';
 
   const roundNum = data.round || contextRound;
+  // 同一轮只保留一个块：每次调 API 推来的 context_view 更新同轮，不无限累积
+  contextData.querySelectorAll('.context-round[data-round="' + roundNum + '"]').forEach(rd => rd.remove());
   const roundDiv = document.createElement('div');
   roundDiv.className = 'context-round';
+  roundDiv.dataset.round = roundNum;
   roundDiv.style.cssText = 'border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden';
 
+  // 本轮已出现过多次调 API：给轮次标题加个"实时发送"标记，区分于(最终)完整快照
+  const isLiveSend = !!(data.full_messages && !data.token_stats && !data.full_system);
+  const roundLabel = isLiveSend ? `第 ${roundNum} 轮 · 本次发送` : `第 ${roundNum} 轮`;
+
   let html = `<div style="padding:8px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:13px;font-weight:600;color:var(--text-bright)">第 ${roundNum} 轮</span>
+    <span style="font-size:13px;font-weight:600;color:var(--text-bright)">${roundLabel}</span>
     <span style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">${(data.timestamp || '').substring(11, 19)}</span>
   </div>`;
 
