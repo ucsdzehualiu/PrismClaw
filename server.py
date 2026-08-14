@@ -11,6 +11,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 
 import uvicorn
@@ -37,14 +38,32 @@ class ChatRequest(BaseModel):
 # Load config
 cfg = load_config()
 server_cfg = cfg.get("server", {})
+SESS_MGR.expires = float(cfg.get("session", {}).get("expires", 300))
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def validate_session_id(session_id: str) -> str:
+    """只允许安全的短 session id，避免日志/会话键被目录穿越。"""
+    session_id = str(session_id or "").strip()
+    if not SESSION_ID_RE.match(session_id):
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=400,
+            detail="session_id must match [A-Za-z0-9_-]{1,64}",
+        )
+    return session_id
 
 
 app = FastAPI(title="PrismClaw Agent")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=server_cfg.get(
+        "cors_origins",
+        ["http://localhost:8765", "http://127.0.0.1:8765"],
+    ),
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -52,15 +71,15 @@ app.add_middleware(
 
 @app.get("/")
 async def index():
-    return FileResponse("index.html")
+    return FileResponse(os.path.join(BASE_DIR, "index.html"))
 
 
 @app.get("/get_personas")
 async def get_personas():
     return {
-        "agents": load_persona_file("AGENTS.md"),
-        "soul": load_persona_file("SOUL.md"),
-        "user": load_persona_file("USER.md"),
+        "agents": load_persona_file("AGENTS.md", WORKSPACE_DIR),
+        "soul": load_persona_file("SOUL.md", WORKSPACE_DIR),
+        "user": load_persona_file("USER.md", WORKSPACE_DIR),
     }
 
 
@@ -82,12 +101,13 @@ async def update_persona(request: Request):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
+    session_id = validate_session_id(request.session_id)
     queue_ok = False
     for _ in range(3):
-        sess = await get_or_create_agent(request.session_id, workspace_dir=WORKSPACE_DIR)
+        sess = await get_or_create_agent(session_id, workspace_dir=WORKSPACE_DIR)
         from session import AgentRequest
         agent_req = AgentRequest(
-            session_id=request.session_id,
+            session_id=session_id,
             content=request.content,
         )
         if await sess.add_request(agent_req):
@@ -112,6 +132,7 @@ async def chat(request: ChatRequest):
 
 @app.get("/stop")
 async def stop(session_id: str, request_id: str):
+    session_id = validate_session_id(session_id)
     sess = await SESS_MGR.get_or_create_session(session_id, create=False)
     if sess is None:
         return {"status": "not_found"}
@@ -126,7 +147,7 @@ async def resolve(request: Request):
     agent 后续输出继续从触发确认的那个原请求的 SSE 流出来。
     """
     body = await request.json()
-    session_id = body.get("session_id", "")
+    session_id = validate_session_id(body.get("session_id", ""))
     sess = await SESS_MGR.get_or_create_session(session_id, create=False)
     if sess is None:
         return {"status": "not_found"}
@@ -148,6 +169,6 @@ async def resolve(request: Request):
 if __name__ == "__main__":
     uvicorn.run(
         app,
-        host=server_cfg.get("host", "0.0.0.0"),
+        host=server_cfg.get("host", "127.0.0.1"),
         port=server_cfg.get("port", 8765),
     )

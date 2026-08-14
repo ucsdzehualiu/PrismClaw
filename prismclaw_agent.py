@@ -27,7 +27,7 @@ from tools import (
     format_system_prompt,
     REASONING_HINT_TEMPLATE,
 )
-from model_config import build_model, load_config
+from model_config import build_model, build_token_counter, load_config
 from context_viz import ContextViz, TokenStats
 from conf import FLAGS
 
@@ -90,6 +90,15 @@ def _prompt_to_readable(prompt) -> list:
             text = f"{text}\n\n{join}" if text else join
         out.append({"role": role, "content": text})
     return out
+
+
+def _is_internal_hint_message(message: dict) -> bool:
+    """过滤实时上下文里的临时内部提示，避免右侧短暂出现第二个 user。"""
+    content = message.get("content", "")
+    return (
+        message.get("role") == "user"
+        and "内部信息，非用户输入" in content
+    )
 
 
 class ModelContextProbe:
@@ -233,6 +242,17 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     toolkit = await build_toolkit(workspace_dir)
     system_prompt = format_system_prompt([], workspace_dir)
     model = build_model(cfg, stream=True)
+    token_counter = build_token_counter(cfg)
+    compression_config = None
+    if ctx_cfg.get("compress_threshold"):
+        compression_config = ReActAgent.CompressionConfig(
+            enable=True,
+            agent_token_counter=token_counter,
+            trigger_threshold=int(
+                token_budget * float(ctx_cfg.get("compress_threshold", 0.8)),
+            ),
+            keep_recent=int(ctx_cfg.get("keep_recent_messages", 6)),
+        )
     # 包一层 model：每次真正调 API 前，把将要发送的上下文（原样）推向前端透明展示。
     # ctx_sink 是会话级可变对象，每轮请求把 emit 指到当轮 SSE 流（见下方 streaming）。
     ctx_sink: dict = {}
@@ -245,6 +265,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         memory=InMemoryMemory(),
         max_iters=max_iters,
         parallel_tool_calls=cfg.get("agent", {}).get("parallel_tool_calls", True),
+        compression_config=compression_config,
         _prismclaw_sess=sess,
     )
     agent.set_console_output_enabled(False)
@@ -260,6 +281,9 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             break
 
         await sess.activate()
+        # 每轮重建 toolkit，让 manage_skill 新建的技能无需重启即可出现在
+        # ReActAgent.sys_prompt 动态附加的官方 Skills 提示词中。
+        agent.toolkit = await build_toolkit(workspace_dir)
 
         # 魔术命令
         is_magic = await handle_magic_command(request, sess)
@@ -310,7 +334,11 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             # ModelContextProbe 每次调 API 前会回调 emit，构造 context_view 事件实时刷新面板，
             # full_messages 用真实 prompt 全量（不截断），一轮内多次调 API 会更新同一个轮块。
             async def emit_context(prompt):
-                readable = _prompt_to_readable(prompt)
+                readable = [
+                    m
+                    for m in _prompt_to_readable(prompt)
+                    if not _is_internal_hint_message(m)
+                ]
                 await q.put({
                     "type": "context_view",
                     "data": {
@@ -527,36 +555,53 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                             if mem_val and isinstance(mem_val, list):
                                 mem_msgs = mem_val
                                 break
-                    hist_tokens_est = 0
-                    for m in mem_msgs:
-                        m_content = getattr(m, "content", "")
-                        if isinstance(m_content, list):
-                            for c in m_content:
-                                if isinstance(c, dict):
-                                    hist_tokens_est += len(str(c.get("text", c.get("output", ""))))
-                                else:
-                                    hist_tokens_est += len(str(c))
-                        else:
-                            hist_tokens_est += len(str(m_content))
-                    total_est = sys_tokens_est + hist_tokens_est
+                    # 填充完整 System Prompt 与历史消息（供前端展示 LLM 实际所见）
+                    # ReActAgent.sys_prompt 会动态附加 toolkit 技能提示词，必须取属性，
+                    # 而不是只取 format_system_prompt() 的裸输出。
+                    actual_system = agent.sys_prompt
+
+                    # 优先使用官方 token counter 统计真实上下文。失败时保留旧字符估算，
+                    # 避免展示层因编码兼容问题阻断主流程。
+                    try:
+                        system_prompt_for_count = await agent.formatter.format(
+                            [
+                                Msg("system", actual_system, "system"),
+                            ],
+                        )
+                        sys_tokens_est = await token_counter.count(
+                            system_prompt_for_count,
+                        )
+                        prompt_for_count = await agent.formatter.format(
+                            [
+                                Msg("system", actual_system, "system"),
+                                *mem_msgs,
+                            ],
+                        )
+                        total_est = await token_counter.count(prompt_for_count)
+                    except Exception:
+                        hist_tokens_est = 0
+                        for m in mem_msgs:
+                            m_content = getattr(m, "content", "")
+                            if isinstance(m_content, list):
+                                for c in m_content:
+                                    if isinstance(c, dict):
+                                        hist_tokens_est += len(
+                                            str(c.get("text", c.get("output", ""))),
+                                        )
+                                    else:
+                                        hist_tokens_est += len(str(c))
+                            else:
+                                hist_tokens_est += len(str(m_content))
+                        total_est = sys_tokens_est + hist_tokens_est
+
                     viz.set_tokens(TokenStats(
                         system_tokens=sys_tokens_est,
-                        history_tokens=hist_tokens_est,
+                        history_tokens=max(total_est - sys_tokens_est, 0),
                         input_tokens=len(user_text),
                         total_tokens=total_est,
                         budget=token_budget,
                         pct=round(total_est / token_budget * 100, 1) if token_budget else 0,
                     ))
-
-                    # 填充完整 System Prompt 与历史消息（供前端展示 LLM 实际所见）
-                    # system_prompt 是 format_system_prompt() 裸输出；mem_msgs[0] 含 AgentScope 注入的技能指令
-                    actual_system = system_prompt
-                    if mem_msgs:
-                        fm = mem_msgs[0]
-                        if getattr(fm, "role", "") == "system":
-                            fc = getattr(fm, "content", "")
-                            if isinstance(fc, str) and fc:
-                                actual_system = fc
                     viz.set_system_context(actual_system, mem_msgs)
 
                     # 推送上下文快照事件
@@ -633,6 +678,7 @@ async def get_or_create_agent(session_id: str, cfg: dict = None, workspace_dir: 
     """获取或创建会话（自动启动 agent_runner 后台任务）。"""
     if cfg is None:
         cfg = load_config()
+    SESS_MGR.expires = float(cfg.get("session", {}).get("expires", 300))
     return await SESS_MGR.get_or_create_session(
         session_id,
         create=True,

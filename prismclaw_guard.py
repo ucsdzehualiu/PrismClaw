@@ -9,7 +9,6 @@
 """
 
 import time
-import uuid
 from typing import Any, Optional
 
 from agentscope.message import Msg, ToolUseBlock, ToolResultBlock, TextBlock
@@ -50,6 +49,11 @@ TOOL_REJECTED_TEMPLATE = """
 (内部信息，非用户输入，禁止直接透露给用户)
 用户拒绝了 {tool_name}({tool_input}) 的执行请求。请判断是否还有其他未完成的步骤需要推进，或直接向用户说明情况。
 """
+
+
+def _fake_result_mark(tool_use_id: str) -> str:
+    """给拦截时写入的假 tool_result 打上可精确清理的 mark。"""
+    return f"PRISMCLAW_HITL_FAKE:{tool_use_id}"
 
 
 class PrismClawGuardMixin:
@@ -94,19 +98,23 @@ class PrismClawGuardMixin:
                 return msg
 
             elif pending.status == PendingStatus.APPROVED:
-                # 重放原 tool_use，改新 id（不能和之前 denied 的重复）
-                # 直接改 pending.tool_use 的 id（引用），_acting 靠 id 匹配
+                # 移除该工具对应的假 tool_result，然后复用原始 tool_use id。
+                # 原始 tool_use 已经在 memory 里，不需要再 add，否则会重复一条。
                 tool_use_block = pending.tool_use
-                tool_use_block["id"] = str(uuid.uuid4())
+                await self.memory.delete_by_mark(
+                    _fake_result_mark(tool_use_block["id"]),
+                )
                 msg = Msg(
                     role="assistant",
                     content=[tool_use_block],
                     name="prismclaw_guard",
                 )
-                await self.memory.add(msg)
                 return msg
 
             elif pending.status == PendingStatus.REJECTED:
+                await self.memory.delete_by_mark(
+                    _fake_result_mark(pending.tool_use["id"]),
+                )
                 await self._prismclaw_sess.pop_pending_tool()
                 next_pending = await self._prismclaw_sess.get_pending_tool() if self._prismclaw_sess else None
                 if next_pending:
@@ -148,7 +156,10 @@ class PrismClawGuardMixin:
                 ],
                 "system",
             )
-            await self.memory.add(tool_res_msg)
+            await self.memory.add(
+                tool_res_msg,
+                marks=[_fake_result_mark(tool_call["id"])],
+            )
             await self.print(tool_res_msg, last=True)
             if self._prismclaw_sess:
                 await self._prismclaw_sess.add_pending_tool(PendingToolUse(dict(tool_call)))

@@ -9,12 +9,14 @@
 """
 
 import asyncio
+import functools
 import json
 import os
 from collections import defaultdict
 from datetime import datetime
 from typing import List
 
+from bs4 import BeautifulSoup
 from agentscope.tool import Toolkit, ToolResponse
 from agentscope.tool import (
     insert_text_file,
@@ -75,18 +77,32 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
         return ToolResponse(content=[TextBlock(type="text", text=f"错误：找不到解释器：{argv[0]}。")])
 
     try:
-        await asyncio.wait_for(proc.wait(), timeout=timeout)
-        stdout, stderr = await proc.communicate()
+        # 直接 communicate() 会同时消费 stdout/stderr，避免大输出把管道写满后
+        # wait() 和 communicate() 相互等待造成死锁。
+        stdout, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=timeout,
+        )
         stdout_str = stdout.decode("utf-8", "replace")
         stderr_str = stderr.decode("utf-8", "replace")
         returncode = proc.returncode
     except asyncio.TimeoutError:
         returncode = -1
+        stdout_str, stderr_str = "", ""
         try:
             proc.terminate()
-            stdout, stderr = await proc.communicate()
-            stdout_str = stdout.decode("utf-8", "replace")
-            stderr_str = stderr.decode("utf-8", "replace")
+            try:
+                stdout, stderr = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=5,
+                )
+                stdout_str = stdout.decode("utf-8", "replace")
+                stderr_str = stderr.decode("utf-8", "replace")
+            except asyncio.TimeoutError:
+                proc.kill()
+                stdout, stderr = await proc.communicate()
+                stdout_str = stdout.decode("utf-8", "replace")
+                stderr_str = stderr.decode("utf-8", "replace")
         except ProcessLookupError:
             stdout_str, stderr_str = "", ""
         stderr_str = (stderr_str + "\n" if stderr_str else "") + \
@@ -143,14 +159,6 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismClaw，一个透明、高效的 AI �
 
 {extra_prompt}
 
-## 可用技能 (Skills)
-
-以下是已安装的技能清单（仅名称和描述）。所有技能统一存放在 `workspace/skills/` 目录下，每个技能一个子文件夹，内含 `SKILL.md`。
-
-当用户需求匹配某个技能时，先用 `view_text_file` 读取 `workspace/skills/<技能名>/SKILL.md` 获取完整执行指令，再按指令执行。不要凭描述猜流程。
-
-{skills_section}
-
 ### 📥 下载与安装
 - `download_file(url, save_name)` — 下载任意网络文件到 `workspace/downloads/`（受控，会请求确认）。
 - `run_shell(command, timeout, shell)` — 执行系统命令（受控，会请求确认）。
@@ -185,53 +193,15 @@ def load_persona_file(filename: str, workspace_dir: str = "workspace") -> str:
         return "(未定义)"
 
 
-def load_skills(workspace_dir: str = "workspace") -> str:
-    """扫描 workspace/skills/，只加载技能元数据（name + description）进 prompt。
-
-    渐进式加载：prompt 里只放一行描述，不塞正文。
-    模型判断要用哪个 skill 时，用 view_text_file 读 SKILL.md 的完整正文。
-    """
-    import re
-    skills_dir = os.path.join(workspace_dir, "skills")
-    if not os.path.isdir(skills_dir):
-        return "(无可用技能)"
-
-    parts = []
-    for name in sorted(os.listdir(skills_dir)):
-        skill_md = os.path.join(skills_dir, name, "SKILL.md")
-        if not os.path.isfile(skill_md):
-            continue
-        try:
-            with open(skill_md, "r", encoding="utf-8") as f:
-                text = f.read()
-            # 提取 frontmatter 里的 name 和 description
-            fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", text, flags=re.DOTALL)
-            desc = ""
-            if fm_match:
-                fm = fm_match.group(1)
-                d_match = re.search(r"^description:\s*(.+?)$", fm, re.MULTILINE)
-                if d_match:
-                    desc = d_match.group(1).strip().strip("'\"")
-            if not desc:
-                desc = "(无描述)"
-            parts.append(f"- **{name}**: {desc}  → 用 `view_text_file` 读 `workspace/skills/{name}/SKILL.md` 获取完整指令")
-        except Exception:
-            pass
-
-    return "\n".join(parts) if parts else "(无可用技能)"
-
-
 def format_system_prompt(extra_prompts: List[str], workspace_dir: str = "workspace") -> str:
     """生成完整的 System Prompt，注入人格定义 + 技能正文。"""
     agents_md = load_persona_file("AGENTS.md", workspace_dir)
     soul_md = load_persona_file("SOUL.md", workspace_dir)
     user_md = load_persona_file("USER.md", workspace_dir)
-    skills_section = load_skills(workspace_dir)
     return AGENT_SYS_PROMPT_TEMPLATE.format(
         agents_md=agents_md,
         soul_md=soul_md,
         user_md=user_md,
-        skills_section=skills_section,
         extra_prompt="\n".join(extra_prompts),
     )
 
@@ -374,19 +344,13 @@ async def _fetch_weather(city: str) -> str:
 
 
 def _html_to_text(html: str) -> str:
-    """简易 HTML → 纯文本：去 script/style/标签，保留换行与可读性。"""
-    # 去 script/style
-    html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", html, flags=re.DOTALL | re.I)
-    # 块级标签转换行
-    html = re.sub(r"</?(p|div|br|li|h[1-6]|tr|section|article)[^>]*>", "\n", html, flags=re.I)
-    # 去剩余标签
-    html = re.sub(r"<[^>]+>", "", html)
-    # HTML 实体
-    html = html.replace("&nbsp;", " ").replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
-    # 压缩空白
-    html = re.sub(r"\n{3,}", "\n\n", html)
-    html = re.sub(r"[ \t]{2,}", " ", html)
-    return html.strip()
+    """HTML → 可读纯文本，使用 BeautifulSoup 而不是脆弱的正则。"""
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "noscript", "svg"]):
+        tag.decompose()
+    text = soup.get_text("\n")
+    lines = [re.sub(r"[ \t]+", " ", line).strip() for line in text.splitlines()]
+    return "\n".join(line for line in lines if line).strip()
 
 
 # ---- 防重复调用（软提示：不阻止，只追加提醒。AgentScope 风格——靠上下文历史让 LLM 自己判断） ----
@@ -480,17 +444,17 @@ async def _bing_cn_search(query: str) -> str:
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 html = await resp.text(errors="ignore")
-        # 以 <h2><a href>标题</a></h2> 为锚点（Bing 结果块的稳定结构）
-        items = re.findall(
-            r'<h2[^>]*>\s*<a[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>\s*</h2>',
-            html, re.DOTALL,
-        )
+        soup = BeautifulSoup(html, "html.parser")
         results = []
-        for link, title_html in items[:6]:
+        for item in soup.select("li.b_algo")[:6]:
+            a = item.select_one("h2 a")
+            if not a:
+                continue
+            link = a.get("href", "")
+            title = a.get_text(" ", strip=True)
             # 跳过 bing 内部链接
             if "bing.com/" in link and "/search" in link:
                 continue
-            title = _html_to_text(title_html)
             if not title:
                 continue
             results.append(f"{len(results)+1}. {title}\n   链接: {link}")
@@ -662,6 +626,7 @@ async def manage_skill(
 async def download_file(
     url: str,
     save_name: str = "",
+    workspace_dir: str = "workspace",
 ) -> ToolResponse:
     """下载一个文件到工作区 workspace/downloads/ 目录（受 HITL 确认保护）。
 
@@ -684,7 +649,7 @@ async def download_file(
         save_name = url.rstrip("/").split("?")[0].split("#")[0].split("/")[-1]
     save_name = re.sub(r'[\\/:*?"<>|]', "_", save_name) or "download.bin"
 
-    save_dir = os.path.join("workspace", "downloads")
+    save_dir = os.path.join(workspace_dir, "downloads")
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, save_name)
     if os.path.exists(save_path):
@@ -771,11 +736,12 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
 
     # 技能管理（化解"装 skill"类未知请求；list/create/info 均为安全动作，不走 HITL 确认）
     if FLAGS.get("enable_skills", True):
-        import functools
         toolkit.register_tool_function(functools.partial(manage_skill, workspace_dir=workspace_dir))
 
     # 下载 + 从 URL 安装技能（受控文件访问，走 HITL 确认）
     if FLAGS.get("enable_download", True):
-        toolkit.register_tool_function(download_file)
+        toolkit.register_tool_function(
+            functools.partial(download_file, workspace_dir=workspace_dir),
+        )
 
     return toolkit

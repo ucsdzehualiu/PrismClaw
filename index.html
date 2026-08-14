@@ -4,103 +4,174 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PrismClaw Agent — 透明 AI 助手</title>
+<link rel="icon" href="data:,">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  --bg:#0f1117; --bg-panel:#161822; --bg-card:#1c1e2e;
-  --bg-input:#141520; --border:#2a2d3e; --border-active:#4a4d6e;
-  --text:#d4d6e0; --text-dim:#7a7d8e; --text-bright:#f0f1f8;
-  --accent:#6c8cff; --accent-glow:rgba(108,140,255,0.15);
-  --success:#4ade80; --warn:#f59e0b; --danger:#f87171;
-  --orange:#ff9800; --purple:#a78bfa; --cyan:#22d3ee;
+  --bg:#0a0d12; --bg-panel:#0e121a; --bg-card:#121826;
+  --bg-input:#0c111a; --border:#202a37; --border-active:#2c3d4f;
+  --text:#c8d1df; --text-dim:#6d7b8e; --text-bright:#edf3fb;
+  --accent:#3ed9c6; --accent-glow:rgba(62,217,198,0.12);
+  --success:#4fe08a; --warn:#f2ba4b; --danger:#ff6f6f;
+  --orange:#ff9f55; --purple:#91a6ff; --cyan:#53d7ff;
   --font-mono:'Cascadia Code','Fira Code','JetBrains Mono',monospace;
   --font-sans:'Inter',-apple-system,sans-serif;
-  --radius:8px; --radius-sm:4px; --transition:0.2s ease;
+  --radius:8px; --radius-sm:5px; --transition:0.2s ease;
 }
 body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden}
 .app{display:flex;height:100vh;flex-direction:column}
 
 /* Toolbar */
-.toolbar{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;
-  background:var(--bg-panel);border-bottom:1px solid var(--border);min-height:48px}
+.toolbar{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;
+  background:var(--bg-panel);border-bottom:1px solid var(--border);min-height:54px}
 .toolbar .brand{display:flex;align-items:center;gap:8px;font-weight:700;font-size:15px;
-  color:var(--text-bright)}
-.toolbar .brand .icon{width:28px;height:28px;background:linear-gradient(135deg,var(--accent),var(--purple));
-  border-radius:6px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:14px}
+  color:var(--text-bright);letter-spacing:.02em}
+.toolbar .brand .icon{width:30px;height:30px;background:var(--bg-card);border:1px solid var(--border-active);
+  border-radius:7px;display:flex;align-items:center;justify-content:center;color:var(--accent);font-size:14px}
 .toolbar .actions{display:flex;gap:8px}
-.btn{padding:6px 14px;border-radius:var(--radius);border:1px solid var(--border);
-  background:var(--bg-card);color:var(--text);cursor:pointer;font-size:13px;transition:var(--transition)}
+.btn{padding:7px 13px;border-radius:var(--radius);border:1px solid var(--border);
+  background:var(--bg-card);color:var(--text);cursor:pointer;font-size:12px;font-family:var(--font-mono);
+  letter-spacing:.01em;transition:var(--transition)}
 .btn:hover{background:var(--border);color:var(--text-bright)}
-.btn.accent{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn.accent{background:var(--accent);border-color:var(--accent);color:#061013}
 .btn.accent:hover{opacity:0.9}
 
 /* Main Panels */
-.main{display:flex;flex:1;overflow:hidden}
-.panel{border-right:1px solid var(--border);overflow-y:auto;overflow-x:hidden}
-.panel:last-child{border-right:none}
+.main{display:grid;flex:1;overflow:hidden;
+  grid-template-columns:210px minmax(340px,1fr) minmax(500px,1.1fr)}
+.panel{overflow-y:auto;overflow-x:hidden}
+
+/* Left rail */
+.panel-sidebar{display:flex;flex-direction:column;gap:12px;min-width:0;
+  padding:12px;background:var(--bg-panel);border-right:1px solid var(--border)}
+.sidebar-action{padding:8px 10px;border-radius:var(--radius);border:1px solid var(--border);
+  background:var(--bg-card);color:var(--text-bright);cursor:pointer;
+  font-family:var(--font-mono);font-size:12px;text-align:left}
+.sidebar-action:hover{background:var(--border)}
+.sidebar-action.accent{background:var(--accent);border-color:var(--accent);color:#061013}
+.sidebar-section{display:flex;flex-direction:column;gap:4px}
+.sidebar-label{font-family:var(--font-mono);font-size:10px;letter-spacing:.12em;
+  color:var(--text-dim)}
+.sidebar-value{font-family:var(--font-mono);font-size:12px;color:var(--text)}
+.sidebar-note{margin-top:auto;font-family:var(--font-mono);font-size:10px;
+  color:var(--text-dim);letter-spacing:.08em}
 
 /* Panel 1: Chat */
-.panel-chat{flex:2;min-width:340px;display:flex;flex-direction:column}
-.chat-messages{flex:1;overflow-y:auto;padding:16px}
+.panel-chat{min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--border)}
+.view-tabs{display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid var(--border);
+  background:var(--bg-panel)}
+.view-tab{padding:6px 10px;border:none;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+  background:transparent;color:var(--text-dim);cursor:pointer;font-family:var(--font-mono);
+  font-size:12px;border-bottom:1px solid transparent}
+.view-tab:hover{color:var(--text-bright)}
+.view-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.chat-messages{flex:1;overflow-y:auto;padding:18px 18px 24px}
 .chat-messages::-webkit-scrollbar{width:6px}
 .chat-messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .chat-input-area{padding:12px 16px;border-top:1px solid var(--border);background:var(--bg-panel)}
 .chat-input{display:flex;gap:8px}
 .chat-input textarea{flex:1;background:var(--bg-input);border:1px solid var(--border);
-  color:var(--text);padding:10px 14px;border-radius:var(--radius);resize:none;
-  font-family:var(--font-sans);font-size:14px;min-height:44px;max-height:120px}
+  color:var(--text);padding:11px 14px;border-radius:var(--radius);resize:none;
+  font-family:var(--font-sans);font-size:14px;min-height:46px;max-height:120px}
 .chat-input textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-glow)}
 .chat-input textarea::placeholder{color:var(--text-dim)}
 
+.trace-view{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+.trace-summary{flex:none;padding:8px 12px;border-bottom:1px solid var(--border);
+  font-family:var(--font-mono);font-size:11px;color:var(--text-dim)}
+.trace-log{flex:1;overflow:auto;padding:8px 12px 18px;font-family:var(--font-mono);font-size:12px}
+.trace-row{display:grid;grid-template-columns:94px minmax(0,1fr);gap:10px;
+  padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.055)}
+.trace-row:hover{background:rgba(255,255,255,0.018)}
+.trace-role{color:var(--text-dim);font-size:10px;line-height:18px;letter-spacing:.06em;
+  text-transform:uppercase;padding-top:1px;opacity:.82}
+.trace-role.system{color:var(--purple)}
+.trace-role.user{color:var(--accent)}
+.trace-role.assistant{color:var(--success)}
+.trace-role.tool{color:var(--orange)}
+.trace-content{min-width:0;color:var(--text);white-space:pre-wrap;word-break:break-word;line-height:1.55}
+.trace-tool{display:inline-flex;padding:2px 7px;margin-right:8px;border-radius:4px;
+  background:rgba(255,158,79,0.10);color:var(--orange);font-weight:600}
+.trace-json{color:var(--cyan);white-space:pre-wrap;word-break:break-word}
+.trace-output{margin:7px 0 0 104px;padding:7px 9px;border-left:2px solid var(--border-active);
+  color:var(--text-dim);white-space:pre-wrap;word-break:break-word;line-height:1.5;
+  background:rgba(255,255,255,0.014);border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+.trace-output pre{margin:0;white-space:pre-wrap;word-break:break-word;color:var(--text-dim)}
+.trace-arrow{display:inline-block;margin-right:8px;color:var(--success);font-weight:700}
+.trace-output.has-error{border-left-color:var(--danger)}
+.trace-output.has-error pre{color:#ff9a9a}
+.trace-turn{grid-column:1/-1;margin:8px 0 2px;padding-top:8px;color:var(--text-bright);
+  font-size:11px;letter-spacing:.08em;text-transform:uppercase;border-top:1px solid rgba(255,255,255,0.10)}
+.trace-state{display:inline-flex;align-items:center;gap:5px;color:var(--text-dim)}
+.trace-state::before{content:"";width:6px;height:6px;border-radius:2px;background:var(--success)}
+.trace-state.running{color:var(--accent)}
+.trace-state.running::before{background:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+.trace-state.error{color:var(--danger)}
+.trace-state.error::before{background:var(--danger)}
+
 /* Message bubbles */
-.msg{margin-bottom:16px;animation:fadeIn 0.25s ease}
+.msg{margin-bottom:18px;animation:fadeIn 0.25s ease}
 .msg.user{display:flex;justify-content:flex-end}
-.msg.user .bubble{background:var(--accent);color:#fff;max-width:80%;border-radius:12px 4px 12px 12px}
+.msg.user .bubble{background:var(--accent);color:#061013;max-width:80%;border-radius:12px 4px 12px 12px}
 .msg.assistant .bubble{background:var(--bg-card);max-width:85%;border-radius:4px 12px 12px 12px;
-  border:1px solid var(--border)}
+  border:1px solid var(--border);box-shadow:inset 3px 0 0 rgba(62,217,198,0.28)}
 .msg.system .bubble{background:transparent;max-width:90%;font-style:italic;color:var(--text-dim);
   font-size:13px;text-align:center}
-.bubble{padding:10px 14px;line-height:1.6;font-size:14px;white-space:pre-wrap;word-break:break-word}
+.bubble{padding:11px 15px;line-height:1.65;font-size:14px;white-space:pre-wrap;word-break:break-word}
 .bubble code{background:rgba(0,0,0,0.2);padding:1px 5px;border-radius:3px;font-family:var(--font-mono);font-size:12px}
 .bubble pre{background:rgba(0,0,0,0.3);padding:10px;border-radius:6px;overflow-x:auto;margin:6px 0;
   font-size:12px;line-height:1.5}
 .bubble pre code{background:none;padding:0}
 
 /* Tool card */
-.tool-card{margin:6px 0;border-radius:var(--radius);border-left:3px solid var(--orange);
-  background:rgba(255,152,0,0.08);overflow:hidden;font-size:13px}
+.tool-card{margin:7px 0;border-radius:var(--radius);border-left:3px solid var(--orange);
+  background:rgba(255,158,79,0.06);overflow:hidden;font-size:13px}
 .tool-card .tool-header{padding:8px 12px;cursor:pointer;display:flex;align-items:center;gap:6px;
-  color:var(--orange);font-weight:600;user-select:none}
+  color:var(--orange);font-weight:600;user-select:none;font-family:var(--font-mono);border-bottom:1px solid rgba(255,159,85,0.10)}
+.tool-card .tool-state{flex:none;width:6px;height:6px;border-radius:2px;background:var(--orange);
+  box-shadow:0 0 0 3px rgba(255,158,79,0.10)}
+.tool-card:not(.loading) .tool-state{background:var(--success);box-shadow:0 0 0 3px rgba(80,224,140,0.10)}
 .tool-card .tool-header .arrow{transition:transform 0.2s;font-size:10px}
 .tool-card.open .tool-header .arrow{transform:rotate(90deg)}
-.tool-card .tool-body{display:none;padding:8px 12px 10px;font-family:var(--font-mono);font-size:12px;
+.tool-card .tool-body{display:none;padding:10px 12px 12px;font-family:var(--font-mono);font-size:12px;
   color:var(--text-dim);border-top:1px solid rgba(255,152,0,0.15);max-height:200px;overflow-y:auto}
 .tool-card.open .tool-body{display:block}
 .tool-card .tool-body .result-label{color:var(--success);margin-top:6px;font-weight:600}
 .tool-card.loading .tool-header::after{content:'';display:inline-block;width:100px;height:3px;
-  background:linear-gradient(90deg,var(--orange),transparent);animation:shimmer 1.5s infinite;
+  background:linear-gradient(90deg,var(--accent),transparent);animation:shimmer 1.5s infinite;
   border-radius:2px;margin-left:auto}
 @keyframes shimmer{0%{opacity:1}50%{opacity:0.3}100%{opacity:1}}
 
 /* HITL confirm */
-.confirm-card{border-left-color:var(--warn)!important;background:rgba(245,158,11,0.08)!important}
+.confirm-card{border-left-color:var(--warn)!important;background:rgba(242,184,75,0.09)!important}
 .confirm-card .tool-header{color:var(--warn)!important}
 .confirm-card .confirm-actions{display:flex;gap:8px;padding:4px 12px 10px}
 .confirm-card .confirm-actions .btn{font-size:12px;padding:4px 10px}
 
-/* Panel 2: Context Spectrum (核心创新) */
-.panel-context{flex:2;min-width:300px;background:var(--bg-panel);display:flex;flex-direction:column}
+/* Right detail rail */
+.panel-details{min-width:0;display:flex;flex-direction:column;overflow:hidden}
+.detail-tabs{flex:none;display:flex;gap:2px;padding:8px 12px 0;border-bottom:1px solid var(--border);
+  background:var(--bg-panel)}
+.detail-tab{padding:6px 10px;border:none;border-radius:var(--radius-sm) var(--radius-sm) 0 0;
+  background:transparent;color:var(--text-dim);cursor:pointer;font-family:var(--font-mono);
+  font-size:12px;border-bottom:1px solid transparent}
+.detail-tab:hover{color:var(--text-bright)}
+.detail-tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.panel-details .panel{min-width:0;border-right:none}
+.panel-context{flex:1 1 52%;min-height:0;background:var(--bg-panel);display:flex;flex-direction:column;
+  border-bottom:1px solid var(--border)}
 .panel-context .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);
   color:var(--text-bright);font-weight:600;font-size:13px;text-transform:uppercase;
-  letter-spacing:0.05em;display:flex;align-items:center;gap:8px}
-.panel-context .panel-header .dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
+  letter-spacing:0.05em;display:flex;align-items:center;gap:8px;font-family:var(--font-mono)}
+.panel-context .panel-header .dot{width:8px;height:8px;border-radius:2px;background:var(--accent);
+  box-shadow:0 0 0 3px rgba(54,214,198,0.12)}
 .context-content{flex:1;overflow-y:auto;padding:12px}
 .context-content::-webkit-scrollbar{width:4px}
 .context-content::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 
 .context-section{margin-bottom:14px}
 .context-section .section-title{font-size:11px;text-transform:uppercase;letter-spacing:0.08em;
-  color:var(--text-dim);margin-bottom:8px;font-weight:600}
+  color:var(--text-dim);margin-bottom:8px;font-weight:600;font-family:var(--font-mono)}
 .context-block{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);
   margin-bottom:6px;overflow:hidden}
 .context-block .block-header{padding:6px 10px;display:flex;align-items:center;justify-content:space-between;
@@ -130,11 +201,11 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
   flex-direction:column;gap:12px}
 .context-empty .prismclaw-icon{font-size:48px;opacity:0.3}
 
-/* Panel 3: Tools & Logs */
-.panel-tools{flex:1.4;min-width:260px;background:var(--bg-panel);display:flex;flex-direction:column}
+/* Tools trace */
+.panel-tools{flex:1 1 48%;min-height:0;background:var(--bg-panel);display:flex;flex-direction:column}
 .panel-tools .panel-header{padding:12px 16px;border-bottom:1px solid var(--border);
   color:var(--text-bright);font-weight:600;font-size:13px;text-transform:uppercase;
-  letter-spacing:0.05em}
+  letter-spacing:0.05em;font-family:var(--font-mono)}
 .tools-content{flex:1;overflow-y:auto;padding:12px}
 .tools-content::-webkit-scrollbar{width:4px}
 .tools-content::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
@@ -142,10 +213,11 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 .tool-timeline::before{content:'';position:absolute;left:5px;top:4px;bottom:4px;width:1px;background:var(--border)}
 .timeline-item{position:relative;margin-bottom:12px;padding-left:14px}
 .timeline-item::before{content:'';position:absolute;left:-14px;top:5px;width:8px;height:8px;
-  border-radius:50%;background:var(--border)}
-.timeline-item.active::before{background:var(--accent);box-shadow:0 0 6px var(--accent-glow)}
+  border-radius:2px;background:var(--border)}
+.timeline-item.active::before{background:var(--accent);box-shadow:0 0 0 3px var(--accent-glow)}
+.timeline-item:not(.active)::before{background:var(--success)}
 .timeline-item .tl-time{font-size:10px;color:var(--text-dim);font-family:var(--font-mono)}
-.timeline-item .tl-tool{font-size:13px;font-weight:600;color:var(--text)}
+.timeline-item .tl-tool{font-size:12px;font-weight:600;color:var(--text);font-family:var(--font-mono)}
 .timeline-item .tl-detail{font-size:11px;color:var(--text-dim);font-family:var(--font-mono);
   margin-top:2px;max-height:80px;overflow-y:auto}
 
@@ -168,13 +240,13 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 .prompt-block .pb-body pre{white-space:pre-wrap;word-break:break-word;font-family:var(--font-mono);
   font-size:11px;color:var(--text-dim);line-height:1.55;margin:0}
 .prompt-block.role-system{border-left:3px solid var(--purple)}
-.prompt-block.role-system .role-tag{background:rgba(167,139,250,0.18);color:var(--purple)}
+.prompt-block.role-system .role-tag{background:rgba(142,162,255,0.15);color:var(--purple)}
 .prompt-block.role-user{border-left:3px solid var(--accent)}
-.prompt-block.role-user .role-tag{background:rgba(108,140,255,0.18);color:var(--accent)}
+.prompt-block.role-user .role-tag{background:rgba(54,214,198,0.12);color:var(--accent)}
 .prompt-block.role-assistant{border-left:3px solid var(--success)}
-.prompt-block.role-assistant .role-tag{background:rgba(74,222,128,0.18);color:var(--success)}
+.prompt-block.role-assistant .role-tag{background:rgba(80,224,140,0.12);color:var(--success)}
 .prompt-block.role-tool{border-left:3px solid var(--orange)}
-.prompt-block.role-tool .role-tag{background:rgba(255,152,0,0.18);color:var(--orange)}
+.prompt-block.role-tool .role-tag{background:rgba(255,158,79,0.12);color:var(--orange)}
 .prompt-block.role-tool .pb-body pre{color:var(--orange)}
 .prompt-toggle-all{color:var(--accent);font-size:10px;cursor:pointer;font-weight:600}
 
@@ -192,14 +264,21 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 
 /* Status badge */
 .badge{display:inline-flex;align-items:center;gap:3px;padding:2px 8px;border-radius:10px;
-  font-size:10px;font-weight:600;text-transform:uppercase}
-.badge.thinking{background:rgba(108,140,255,0.15);color:var(--accent)}
-.badge.acting{background:rgba(255,152,0,0.15);color:var(--orange)}
-.badge.done{background:rgba(74,222,128,0.15);color:var(--success)}
-.badge.stopped{background:rgba(248,113,113,0.15);color:var(--danger)}
-.badge.pending{background:rgba(245,158,11,0.15);color:var(--warn)}
-.badge.live{background:rgba(108,140,255,0.15);color:var(--accent)}
-.badge.reasoning{background:rgba(167,139,250,0.15);color:var(--purple)}
+  font-size:10px;font-weight:600;text-transform:uppercase;font-family:var(--font-mono)}
+.badge.thinking{background:rgba(54,214,198,0.12);color:var(--accent)}
+.badge.acting{background:rgba(255,158,79,0.12);color:var(--orange)}
+.badge.done{background:rgba(80,224,140,0.12);color:var(--success)}
+.badge.stopped{background:rgba(255,107,107,0.12);color:var(--danger)}
+.badge.pending{background:rgba(242,184,75,0.12);color:var(--warn)}
+.badge.live{background:rgba(54,214,198,0.12);color:var(--accent)}
+.badge.reasoning{background:rgba(142,162,255,0.12);color:var(--purple)}
+
+@media(max-width:900px){
+  .main{grid-template-columns:1fr;overflow:auto}
+  .panel-sidebar{display:none}
+  .panel-chat{border-right:none}
+  .panel-details{min-height:900px}
+}
 </style>
 </head>
 <body>
@@ -208,26 +287,45 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
   <div class="toolbar">
     <div class="brand">
       <div class="icon">💎</div>
-      <span>PrismClaw Agent</span>
+      <span>PRISMCLAW // AGENT TRACE</span>
     </div>
     <div class="actions">
       <span id="statusBadge" class="badge thinking">就绪</span>
       <span id="liveStatus" class="badge" style="display:none"></span>
       <button class="btn" id="stopBtn" onclick="stopGeneration()" style="display:none" title="打断当前生成">⏹ 停止</button>
-      <button class="btn" onclick="resetChat()" title="新会话">新会话</button>
     </div>
   </div>
 
   <!-- Main Panels -->
   <div class="main">
+    <aside class="panel-sidebar">
+      <button class="sidebar-action accent" onclick="resetChat()">+ 新会话</button>
+      <div class="sidebar-section">
+        <div class="sidebar-label">WORKSPACE</div>
+        <div class="sidebar-value">workspace</div>
+      </div>
+      <div class="sidebar-section">
+        <div class="sidebar-label">MODEL</div>
+        <div class="sidebar-value">dsv4</div>
+      </div>
+      <div class="sidebar-note">LOCAL TRACE</div>
+    </aside>
     <!-- Panel 1: Chat -->
     <div class="panel panel-chat" id="chatPanel">
+      <div class="view-tabs">
+        <button class="view-tab active" data-view="chat" onclick="switchView('chat')">对话</button>
+        <button class="view-tab" data-view="trace" onclick="switchView('trace')">轨迹</button>
+      </div>
       <div class="chat-messages" id="chatMessages">
         <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:14px;flex-direction:column;gap:10px">
           <div style="font-size:40px;opacity:0.3">💎</div>
           <div>开始对话，观察 PrismClaw 的思考过程</div>
           <div style="font-size:12px">右侧面板展示每轮 Agent 实际"看到"的上下文</div>
         </div>
+      </div>
+      <div class="trace-view" id="traceView" style="display:none">
+        <div class="trace-summary" id="traceSummary">等待轨迹数据…</div>
+        <div class="trace-log" id="traceLog"></div>
       </div>
       <div class="chat-input-area">
         <div class="chat-input">
@@ -238,27 +336,32 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
       </div>
     </div>
 
-    <!-- Panel 2: Context Spectrum (核心创新) -->
-    <div class="panel panel-context" id="contextPanel">
-      <div class="panel-header">
-        <div class="dot"></div> 上下文光谱 Context Spectrum
+    <!-- Right Detail: Context + Tool Trace -->
+    <div class="panel-details">
+      <div class="detail-tabs">
+        <button class="detail-tab active" data-pane="context" onclick="switchDetailPane('context')">上下文</button>
+        <button class="detail-tab" data-pane="tools" onclick="switchDetailPane('tools')">工具</button>
       </div>
-      <div class="context-content" id="contextContent">
-        <div class="context-empty" id="contextEmpty">
-          <div class="prismclaw-icon">🔮</div>
-          <div>Agent 看到的内容<br>将在这里逐轮展示</div>
+      <div class="panel panel-context" id="contextPanel">
+        <div class="panel-header">
+          <div class="dot"></div> 上下文轨迹 Context Trace
         </div>
-        <div id="contextData" style="display:none"></div>
+        <div class="context-content" id="contextContent">
+          <div class="context-empty" id="contextEmpty">
+            <div class="prismclaw-icon">▣</div>
+            <div>Agent 实际收到的上下文<br>将在这里逐轮展开</div>
+          </div>
+          <div id="contextData" style="display:none"></div>
+        </div>
       </div>
-    </div>
 
-    <!-- Panel 3: Tools & Logs -->
-    <div class="panel panel-tools" id="toolsPanel">
-      <div class="panel-header">工具调用 Tools & Logs</div>
-      <div class="tools-content" id="toolsContent">
-        <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:13px;flex-direction:column;gap:8px">
-          <div style="font-size:32px;opacity:0.2">🔧</div>
-          <div>工具调用记录</div>
+      <div class="panel panel-tools" id="toolsPanel">
+        <div class="panel-header">工具轨迹 Tool Trace</div>
+        <div class="tools-content" id="toolsContent">
+          <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:13px;flex-direction:column;gap:8px">
+            <div style="font-size:28px;opacity:0.25">▤</div>
+            <div>工具调用会按执行顺序<br>在这里形成轨迹</div>
+          </div>
         </div>
       </div>
     </div>
@@ -267,7 +370,10 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 
 <script>
 // ====== State ======
-const SESSION_ID = 'default';
+const SESSION_STORAGE_KEY = 'prismclaw_session_id';
+let SESSION_ID = sessionStorage.getItem(SESSION_STORAGE_KEY)
+  || ('sess-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
+sessionStorage.setItem(SESSION_STORAGE_KEY, SESSION_ID);
 let currentRequestId = null;
 let messages = [];
 let toolCalls = [];
@@ -278,6 +384,9 @@ let lastAsstId = '';              // magic 命令复用最后一条 assistant �
 let lastAsstMsg = null;
 let messageIdOrder = [];          // msg_id order
 let _stopped = false;             // 用户点了停止，阻止 sendMessage 收尾覆盖状态
+let currentTraceUserText = '';
+let traceToolSteps = new Map();
+let traceViewMode = 'chat';
 
 // ====== DOM ======
 const chatMessages = document.getElementById('chatMessages');
@@ -288,6 +397,108 @@ const toolsContent = document.getElementById('toolsContent');
 const userInput = document.getElementById('userInput');
 const sendBtn = document.getElementById('sendBtn');
 const statusBadge = document.getElementById('statusBadge');
+
+function switchView(view) {
+  traceViewMode = view === 'trace' ? 'trace' : 'chat';
+  const chatMessages = document.getElementById('chatMessages');
+  const traceView = document.getElementById('traceView');
+  const inputArea = document.querySelector('.chat-input-area');
+  if (traceViewMode === 'trace') {
+    chatMessages.style.display = 'none';
+    inputArea.style.display = 'none';
+    traceView.style.display = 'flex';
+    renderTraceTable();
+  } else {
+    chatMessages.style.display = '';
+    inputArea.style.display = '';
+    traceView.style.display = 'none';
+  }
+  document.querySelectorAll('.view-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.view === traceViewMode);
+  });
+}
+
+function switchDetailPane(pane) {
+  const contextPanel = document.getElementById('contextPanel');
+  const toolsPanel = document.getElementById('toolsPanel');
+  contextPanel.style.display = pane === 'tools' ? 'none' : 'flex';
+  toolsPanel.style.display = pane === 'tools' ? 'flex' : 'none';
+  document.querySelectorAll('.detail-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.pane === pane);
+  });
+}
+
+function traceStateClass(state) {
+  return state === 'running' ? 'running' : state === 'error' ? 'error' : '';
+}
+
+function isErrorOutput(output) {
+  return /\[stderr\]|ParserError|exit code:\s*[1-9]/i.test(output || '');
+}
+
+function renderTraceTable() {
+  const log = document.getElementById('traceLog');
+  const summary = document.getElementById('traceSummary');
+  if (!log || !summary) return;
+
+  const blocks = [];
+  const assistant = lastAsstMsg || { content: '', toolCalls: [] };
+
+  if (currentTraceUserText) {
+    blocks.push({ turn: 'Turn 1' });
+    blocks.push({ role: 'SYSTEM', content: 'Initial System Prompt', state: 'done' });
+    blocks.push({ role: 'USER', content: currentTraceUserText, state: 'done' });
+  }
+
+  if (assistant.toolCalls && assistant.toolCalls.length) {
+    blocks.push({ role: 'ASSISTANT', content: '(tool call only)', state: 'done' });
+  }
+
+  for (const call of assistant.toolCalls || []) {
+    blocks.push({
+      role: 'TOOL',
+      toolName: call.name || 'tool',
+      toolInput: call.input || {},
+      output: typeof call.output === 'string' ? call.output : JSON.stringify(call.output || ''),
+      state: call.status === 'done' ? 'done' : 'running',
+    });
+  }
+
+  if (assistant.content && assistant.content.trim()) {
+    blocks.push({ role: 'ASSISTANT', content: assistant.content, state: 'done' });
+  }
+
+  if (!blocks.length) {
+    summary.textContent = '等待轨迹数据…';
+    log.innerHTML = '<div class="trace-empty" style="padding:24px;color:var(--text-dim);text-align:center">执行任务后，轨迹会显示在这里</div>';
+    return;
+  }
+
+  const runningCount = blocks.filter(row => row.state === 'running').length;
+  const toolCount = blocks.filter(row => row.role === 'TOOL').length;
+  summary.textContent = `1 turn · ${toolCount} call${toolCount === 1 ? '' : 's'} · ${runningCount} running`;
+  log.innerHTML = blocks.map((row, index) => {
+    if (row.turn) {
+      return `<div class="trace-turn">${escapeHtml(row.turn)}</div>`;
+    }
+    const roleClass = row.role.toLowerCase();
+    const content = row.toolName
+      ? `<span class="trace-tool">${escapeHtml(row.toolName)}</span><span class="trace-json">${escapeHtml(JSON.stringify(row.toolInput, null, 2))}</span>`
+      : escapeHtml(row.content || '');
+    const outputClass = isErrorOutput(row.output) ? 'trace-output has-error' : 'trace-output';
+    const output = row.output
+      ? `<div class="${outputClass}"><span class="trace-arrow">→</span><pre>${escapeHtml(row.output)}</pre></div>`
+      : '';
+    const state = row.role === 'TOOL'
+      ? `<span class="trace-state ${traceStateClass(row.state)}">${row.state}</span>`
+      : '';
+    return `
+      <div class="trace-row">
+        <div class="trace-role ${roleClass}">${escapeHtml(row.role)}</div>
+        <div class="trace-content">${content}${state}${output}</div>
+      </div>`;
+  }).join('');
+}
 
 // ====== Send ======
 function onInputKey(e) {
@@ -324,6 +535,8 @@ async function sendMessage() {
   toolCalls = [];
   messageBlocks = new Map();
   messageIdOrder = [];
+  currentTraceUserText = text;
+  renderTraceTable();
 
   // SSE request
   if (abortController) abortController.abort();
@@ -482,7 +695,12 @@ function rebuildAssistantMessage(asstId, asstMsg) {
           seenToolResults.add(id);
           const tc = findToolCall(id, asstMsg);
           if (tc) {
-            tc.output = item.output;
+            const nextOutput = item.output;
+            const isFakeNext = String(nextOutput || '').includes('等待确认');
+            const isRealCurrent = String(tc.output || '').includes('<returncode>') || String(tc.output || '').includes('<stdout>');
+            if (!(isFakeNext && isRealCurrent)) {
+              tc.output = nextOutput;
+            }
             tc.status = 'done';
             updateToolCard(tc);
             updateTimelineResult(tc);
@@ -511,6 +729,7 @@ function rebuildAssistantMessage(asstId, asstMsg) {
     asstMsg.content = allText;
     updateAssistantContent(asstId, allText);
   }
+  renderTraceTable();
 }
 
 function findToolCall(id, asstMsg) {
@@ -662,6 +881,17 @@ async function sendMagic(cmd) {
             const msgId = event.msg_id || 'msg0';
             messageBlocks.set(msgId, event.contents);
             if (!messageIdOrder.includes(msgId)) messageIdOrder.push(msgId);
+            for (const c of event.contents) {
+              if (c.type === 'tool_result' && lastAsstMsg) {
+                const tc = (lastAsstMsg.toolCalls || []).find(t => t.id === c.tool_use_id);
+                if (tc) {
+                  tc.output = c.output;
+                  tc.status = 'done';
+                  updateToolCard(tc);
+                  updateTimelineResult(tc);
+                }
+              }
+            }
             // magic 命令结果直接推到最后一条 assistant 气泡
             if (lastAsstId && lastAsstMsg) rebuildAssistantMessage(lastAsstId, lastAsstMsg);
           }
@@ -688,7 +918,7 @@ function addToolCard(asstId, tc) {
   const paramStr = JSON.stringify(tc.input, null, 2).substring(0, 300);
   card.innerHTML = `
     <div class="tool-header" onclick="toggleToolCard('${tc.id}')">
-      <span class="arrow">▶</span> 🔧 <code>${escapeHtml(tc.name)}</code>
+      <span class="tool-state"></span><span class="arrow">▶</span> <code>${escapeHtml(tc.name)}</code>
     </div>
     <div class="tool-body">
       <div style="color:var(--text-dim)">参数:</div>
@@ -734,7 +964,7 @@ function updateToolCard(tc) {
         }).join('\n');
       }
     } catch(e) { /* not JSON, keep as is */ }
-    resultEl.textContent = '✅ 结果: ' + (output || '(空)');
+    resultEl.textContent = '→ ' + (output || '(空)');
   }
   scrollChat();
 }
@@ -939,6 +1169,8 @@ function setStatus(type, text) {
 }
 
 function resetChat() {
+  SESSION_ID = 'sess-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  sessionStorage.setItem(SESSION_STORAGE_KEY, SESSION_ID);
   location.reload();
 }
 
@@ -1033,6 +1265,8 @@ function renderMarkdown(text) {
 }
 
 // Focus input on load
+switchView('chat');
+switchDetailPane('context');
 userInput.focus();
 </script>
 </body>
