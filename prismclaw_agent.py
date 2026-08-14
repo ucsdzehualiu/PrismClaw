@@ -1,4 +1,4 @@
-"""PrismClaw Agent 核心。
+"""PrismClaw Harness 核心。
 
 基于 AgentScope ReActAgent + PrismClawGuard Mixin，注入：
 - 推理提示 Hook (ReasoningHint) — 每次推理前注入规则提醒
@@ -35,7 +35,7 @@ from conf import FLAGS
 # ---- Mixin 组装：PrismClawAgent = PrismClawGuard + ReActAgent ----
 
 class PrismClawAgent(PrismClawGuardMixin, ReActAgent):
-    """PrismClaw Agent = ReActAgent + HITL 工具确认。"""
+    """PrismClaw Harness = ReActAgent + HITL 工具确认。"""
     pass
 
 

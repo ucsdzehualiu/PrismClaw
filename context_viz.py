@@ -1,4 +1,4 @@
-"""PrismClaw 上下文可视化引擎（ContextViz）。
+"""PrismClaw Harness 上下文可视化引擎（ContextViz）。
 
 每轮对话的核心创新：把 Agent 实际"看到"的上下文结构化展示。
 把每轮上下文结构化为面向 Web 的 JSON 事件流与可读 Markdown 日志。

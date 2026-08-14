@@ -1,9 +1,9 @@
 @echo off
-title PrismClaw Agent
+title PrismClaw Harness
 chcp 65001 >nul 2>&1
 
 echo ========================================
-echo   PrismClaw Agent - Context Spectrum
+echo   PrismClaw Harness - Context Spectrum
 echo ========================================
 echo.
 
@@ -26,7 +26,7 @@ echo Opening browser when ready...
 echo.
 
 REM ---- 启动新 server（窗口标题便于识别）----
-start "PrismClaw Server" /B %PYTHON% server.py
+start "PrismClaw Harness Server" /B %PYTHON% server.py
 
 REM ---- 等端口真正起来再开浏览器 ----
 set "READY=0"

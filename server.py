@@ -1,4 +1,4 @@
-"""PrismClaw Server — FastAPI + SSE 流式服务。
+"""PrismClaw Harness Server — FastAPI + SSE 流式服务。
 
 基于 FastAPI + SSE 的精简服务：
 - POST /chat — SSE 流式对话
@@ -55,7 +55,7 @@ def validate_session_id(session_id: str) -> str:
     return session_id
 
 
-app = FastAPI(title="PrismClaw Agent")
+app = FastAPI(title="PrismClaw Harness")
 
 app.add_middleware(
     CORSMiddleware,

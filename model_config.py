@@ -1,4 +1,4 @@
-"""PrismClaw LLM 模型配置。基于 AgentScope OpenAIChatModel，接入自部署 dsv4。"""
+"""PrismClaw Harness LLM 模型配置。基于 AgentScope OpenAIChatModel，接入自部署 dsv4。"""
 
 import os
 import yaml

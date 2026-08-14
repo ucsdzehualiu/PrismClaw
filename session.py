@@ -1,4 +1,4 @@
-"""PrismClaw 会话管理。
+"""PrismClaw Harness 会话管理。
 
 会话与全局会话管理器：
 - 每个 session 独立请求队列（asyncio.Queue）

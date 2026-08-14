@@ -1,4 +1,4 @@
-# PrismClaw Agent 依赖
+# PrismClaw Harness 依赖
 # 基于 AgentScope ReActAgent 框架
 
 agentscope>=1.0.18
