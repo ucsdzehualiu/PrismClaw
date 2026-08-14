@@ -1,4 +1,4 @@
-"""PrismClaw Harness 启动前/退出后清理脚本。
+"""PrismHarness 启动前/退出后清理脚本。
 
 1. 按端口 8765 找到并杀掉旧 server 进程（解析 netstat 输出，正则可靠，无 cmd 转义问题）
 2. 递归删除所有 __pycache__，强制加载最新 .py 代码

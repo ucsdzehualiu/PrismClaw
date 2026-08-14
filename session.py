@@ -1,8 +1,8 @@
-"""PrismClaw Harness 会话管理。
+"""PrismHarness 会话管理。
 
 会话与全局会话管理器：
 - 每个 session 独立请求队列（asyncio.Queue）
-- pending_tool 队列（PrismClawGuard 确认）
+- pending_tool 队列（PrismHarnessGuard 确认）
 - 会话过期自动回收
 - 请求级打断（cancel）
 """

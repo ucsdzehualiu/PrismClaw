@@ -1,4 +1,4 @@
-"""PrismClaw Harness 工具系统。
+"""PrismHarness 工具系统。
 
 基于 AgentScope Toolkit 的注册模式：
 - 文件操作 (view/write/insert)
@@ -136,7 +136,7 @@ REASONING_HINT_TEMPLATE = """
 - 调高风险工具前自言自语"需要确认"——确认是系统弹卡片的事，你只管调工具
 """
 
-AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismClaw Harness，一个透明、高效的 AI 助手。
+AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismHarness，一个透明、高效的 AI 助手。
 
 ## 核心原则
 1. **透明度高于一切** — 每次操作都清晰告知用户，包括为什么调用工具、工具返回了什么
@@ -560,7 +560,7 @@ async def manage_skill(
     content: str = "",
     workspace_dir: str = "workspace",
 ) -> ToolResponse:
-    """技能管理工具（PrismClaw 原生，用于化解"装 skill"类未知请求）。
+    """技能管理工具（PrismHarness 原生，用于化解"装 skill"类未知请求）。
 
     支持三种动作：
     - list:   列出 workspace/skills 下已安装的本地技能（避免重复安装）

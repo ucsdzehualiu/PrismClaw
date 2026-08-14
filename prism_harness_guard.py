@@ -1,4 +1,4 @@
-"""PrismClawGuard — HITL 工具调用确认。
+"""PrismHarnessGuard — HITL 工具调用确认。
 
 基于 ReActAgent 扩展，实现工具调用的人工确认：
 - _acting：高风险工具 → 往 memory 加"等待确认"的 ToolResultBlock → add_pending_tool → return None
@@ -53,19 +53,19 @@ TOOL_REJECTED_TEMPLATE = """
 
 def _fake_result_mark(tool_use_id: str) -> str:
     """给拦截时写入的假 tool_result 打上可精确清理的 mark。"""
-    return f"PRISMCLAW_HITL_FAKE:{tool_use_id}"
+    return f"PRISM_HARNESS_HITL_FAKE:{tool_use_id}"
 
 
-class PrismClawGuardMixin:
+class PrismHarnessGuardMixin:
     """重写 _reasoning 和 _acting，靠 pending 状态轮询实现确认后执行。"""
 
     def __init__(self, *args, **kwargs) -> None:
-        self._prismclaw_sess = kwargs.pop("_prismclaw_sess", None)
+        self._prism_harness_sess = kwargs.pop("_prism_harness_sess", None)
         super().__init__(*args, **kwargs)
 
     async def _reasoning(self, tool_choice=None) -> Msg:
         while True:
-            pending = await self._prismclaw_sess.get_pending_tool() if self._prismclaw_sess else None
+            pending = await self._prism_harness_sess.get_pending_tool() if self._prism_harness_sess else None
 
             if not pending:
                 return await super()._reasoning(tool_choice)
@@ -91,7 +91,7 @@ class PrismClawGuardMixin:
                 msg = Msg(
                     role="assistant",
                     content=[TextBlock(type="text", text=content)],
-                    name="prismclaw_guard",
+                    name="prism_harness_guard",
                 )
                 await self.memory.add(msg)
                 await self.print(msg, last=True)
@@ -107,7 +107,7 @@ class PrismClawGuardMixin:
                 msg = Msg(
                     role="assistant",
                     content=[tool_use_block],
-                    name="prismclaw_guard",
+                    name="prism_harness_guard",
                 )
                 return msg
 
@@ -115,14 +115,14 @@ class PrismClawGuardMixin:
                 await self.memory.delete_by_mark(
                     _fake_result_mark(pending.tool_use["id"]),
                 )
-                await self._prismclaw_sess.pop_pending_tool()
-                next_pending = await self._prismclaw_sess.get_pending_tool() if self._prismclaw_sess else None
+                await self._prism_harness_sess.pop_pending_tool()
+                next_pending = await self._prism_harness_sess.get_pending_tool() if self._prism_harness_sess else None
                 if next_pending:
                     continue  # 还有下一个待确认
                 # 没有了，通知模型重新思考
                 hint = TOOL_REJECTED_TEMPLATE.format(tool_name=tool_name, tool_input=tool_input)
                 await self.memory.add(
-                    Msg(role="user", content=[TextBlock(type="text", text=hint)], name="prismclaw_guard"),
+                    Msg(role="user", content=[TextBlock(type="text", text=hint)], name="prism_harness_guard"),
                     marks=["TOOL_REJECTED"],
                 )
                 try:
@@ -131,15 +131,15 @@ class PrismClawGuardMixin:
                     await self.memory.delete_by_mark("TOOL_REJECTED")
 
     async def _acting(self, tool_call: ToolUseBlock) -> Optional[dict]:
-        pending = await self._prismclaw_sess.get_pending_tool() if self._prismclaw_sess else None
+        pending = await self._prism_harness_sess.get_pending_tool() if self._prism_harness_sess else None
 
         # 已批准的 pending 工具直接执行（ID 匹配）
         if pending and pending.tool_use.get("id") == tool_call.get("id") and pending.status == PendingStatus.APPROVED:
-            await self._prismclaw_sess.pop_pending_tool()
+            await self._prism_harness_sess.pop_pending_tool()
             return await super()._acting(tool_call)
 
         # auto_approve 模式：跳过确认，直接执行高风险工具
-        if getattr(self._prismclaw_sess, "auto_approve", False):
+        if getattr(self._prism_harness_sess, "auto_approve", False):
             return await super()._acting(tool_call)
 
         # 高风险工具 → 假装执行完，入队 pending，return None
@@ -161,8 +161,8 @@ class PrismClawGuardMixin:
                 marks=[_fake_result_mark(tool_call["id"])],
             )
             await self.print(tool_res_msg, last=True)
-            if self._prismclaw_sess:
-                await self._prismclaw_sess.add_pending_tool(PendingToolUse(dict(tool_call)))
+            if self._prism_harness_sess:
+                await self._prism_harness_sess.add_pending_tool(PendingToolUse(dict(tool_call)))
             return None
 
         # 非高风险工具：直接执行

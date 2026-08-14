@@ -1,4 +1,4 @@
-# PrismClaw Harness
+# PrismHarness
 
 > 一个基于 **AgentScope** 框架构建的透明 AI Agent。
 > 核心能力：**每轮上下文可视化**（看清模型这一轮“看到了什么”）+ **HITL 工具确认**（写文件 / 跑命令前必须人工确认）+ **实时流式与可打断**（当前在想什么、调什么工具、随时中断）。
@@ -53,12 +53,12 @@ python server.py
                                    │
                                    ▼
                           agent_runner() 每会话一个后台循环
-                          (prismclaw_agent.py)
-                            ├─ PrismClawAgent
-                            │   = PrismClawGuardMixin + ReActAgent (AgentScope)
+                          (prism_harness_agent.py)
+                            ├─ PrismHarnessAgent
+                            │   = PrismHarnessGuardMixin + ReActAgent (AgentScope)
                             │     ├─ _reasoning (注入提示)
                             │     └─ _acting  (HITL 拦截)
-                            │        (prismclaw_guard.py)
+                            │        (prism_harness_guard.py)
                             ├─ build_toolkit() 工具包 (tools.py)
                             └─ ContextViz 上下文快照引擎 (context_viz.py)
                                    │              │              │
@@ -68,9 +68,9 @@ python server.py
 
 **一轮对话数据流**：
 1. 浏览器发 `POST /chat`，server 把请求塞进 `Session` 的请求队列。
-2. `agent_runner` 取出请求，交给 `PrismClawAgent` 跑 ReAct 循环。
+2. `agent_runner` 取出请求，交给 `PrismHarnessAgent` 跑 ReAct 循环。
 3. 每一步 AgentScope 产出的消息（文本 / 工具调用 / 工具结果）被 `streaming()` 捕获，转成 SSE 事件推回浏览器。
-4. 遇到高风险工具，`prismclaw_guard` 拦截、入队 pending、弹确认卡片；你 `/approve` 后下一轮才真正执行。
+4. 遇到高风险工具，`prism_harness_guard` 拦截、入队 pending、弹确认卡片；你 `/approve` 后下一轮才真正执行。
 5. 每轮结束，`ContextViz` 生成上下文快照（JSON + Markdown）落盘到 `session_logs/`。
 
 ## 文件说明
@@ -85,8 +85,8 @@ python server.py
 - `requirements.txt` — Python 依赖。
 
 ### 核心模块
-- `prismclaw_agent.py` — Agent 定义（`PrismClawAgent`）+ 每会话后台运行循环 `agent_runner()`，负责流式 SSE 推送、心跳、工具调用去重、magic 命令（`/approve` `/reject`）。
-- `prismclaw_guard.py` — HITL 工具确认（`PrismClawGuardMixin`），重写 ReActAgent 的 `_reasoning` / `_acting`，靠 pending 状态轮询实现“确认后才执行”。
+- `prism_harness_agent.py` — Agent 定义（`PrismHarnessAgent`）+ 每会话后台运行循环 `agent_runner()`，负责流式 SSE 推送、心跳、工具调用去重、magic 命令（`/approve` `/reject`）。
+- `prism_harness_guard.py` — HITL 工具确认（`PrismHarnessGuardMixin`），重写 ReActAgent 的 `_reasoning` / `_acting`，靠 pending 状态轮询实现“确认后才执行”。
 - `tools.py` — 工具系统，基于 AgentScope `Toolkit` 注册全部内置工具（命令执行 / 网页抓取 / 联网搜索 / 技能管理 / 文件下载）并生成系统提示词。
 - `context_viz.py` — 上下文可视化引擎（`ContextViz`），每轮生成结构化上下文快照供前端透明化展示与落盘。
 - `session.py` — 会话管理（`Session` / `SessionManager`），请求队列、HITL 确认队列、超时回收。

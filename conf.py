@@ -1,4 +1,4 @@
-"""PrismClaw Harness 功能开关。统一管理所有可选功能的启用/禁用。"""
+"""PrismHarness 功能开关。统一管理所有可选功能的启用/禁用。"""
 
 FLAGS = {
     # 核心工具
@@ -19,7 +19,7 @@ FLAGS = {
     "enable_skill_auto_discover": True,
 }
 
-# 需要人工确认的工具 (PrismClawGuard 会拦截这些)
+# 需要人工确认的工具 (PrismHarnessGuard 会拦截这些)
 GUARD_TOOLS = [
     "write_text_file",
     "insert_text_file",

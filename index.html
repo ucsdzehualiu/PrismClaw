@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PrismClaw Harness — 透明 AI 助手</title>
+<title>PrismHarness — 透明 AI 助手</title>
 <link rel="icon" href="data:,">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -15,10 +15,11 @@
   --success:#4fe08a; --warn:#f2ba4b; --danger:#ff6f6f;
   --orange:#ff9f55; --purple:#91a6ff; --cyan:#53d7ff;
   --font-mono:'Cascadia Code','Fira Code','JetBrains Mono',monospace;
-  --font-sans:'Inter',-apple-system,sans-serif;
+  --font-sans:'Segoe UI Variable','Segoe UI','Inter',-apple-system,sans-serif;
   --radius:8px; --radius-sm:5px; --transition:0.2s ease;
 }
-body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:100vh;overflow:hidden;
+  font-variant-numeric:tabular-nums;-webkit-font-smoothing:antialiased}
 .app{display:flex;height:100vh;flex-direction:column}
 
 /* Toolbar */
@@ -199,7 +200,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 .context-empty{display:flex;align-items:center;justify-content:center;height:60%;
   color:var(--text-dim);font-size:14px;text-align:center;line-height:1.8;
   flex-direction:column;gap:12px}
-.context-empty .prismclaw-icon{font-size:48px;opacity:0.3}
+.context-empty .prism-harness-icon{font-size:48px;opacity:0.3}
 
 /* Tools trace */
 .panel-tools{flex:1 1 48%;min-height:0;background:var(--bg-panel);display:flex;flex-direction:column}
@@ -287,7 +288,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
   <div class="toolbar">
     <div class="brand">
       <div class="icon">💎</div>
-      <span>PRISMCLAW HARNESS</span>
+      <span>PRISM HARNESS</span>
     </div>
     <div class="actions">
       <span id="statusBadge" class="badge thinking">就绪</span>
@@ -319,7 +320,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
       <div class="chat-messages" id="chatMessages">
         <div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:14px;flex-direction:column;gap:10px">
           <div style="font-size:40px;opacity:0.3">💎</div>
-          <div>开始对话，观察 PrismClaw Harness 的思考过程</div>
+          <div>开始对话，观察 PrismHarness 的思考过程</div>
           <div style="font-size:12px">右侧面板展示每轮 Agent 实际"看到"的上下文</div>
         </div>
       </div>
@@ -348,7 +349,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
         </div>
         <div class="context-content" id="contextContent">
           <div class="context-empty" id="contextEmpty">
-            <div class="prismclaw-icon">▣</div>
+            <div class="prism-harness-icon">▣</div>
             <div>Agent 实际收到的上下文<br>将在这里逐轮展开</div>
           </div>
           <div id="contextData" style="display:none"></div>
@@ -370,7 +371,7 @@ body{font-family:var(--font-sans);background:var(--bg);color:var(--text);height:
 
 <script>
 // ====== State ======
-const SESSION_STORAGE_KEY = 'prismclaw_session_id';
+const SESSION_STORAGE_KEY = 'prism_harness_session_id';
 let SESSION_ID = sessionStorage.getItem(SESSION_STORAGE_KEY)
   || ('sess-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8));
 sessionStorage.setItem(SESSION_STORAGE_KEY, SESSION_ID);

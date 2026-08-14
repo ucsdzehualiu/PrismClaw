@@ -1,6 +1,6 @@
-"""PrismClaw Harness 核心。
+"""PrismHarness 核心。
 
-基于 AgentScope ReActAgent + PrismClawGuard Mixin，注入：
+基于 AgentScope ReActAgent + PrismHarnessGuard Mixin，注入：
 - 推理提示 Hook (ReasoningHint) — 每次推理前注入规则提醒
 - 上下文可视化 Hook — 每轮生成 ContextSnapshot
 - 会话活跃保持 Hook — 防止超时
@@ -20,7 +20,7 @@ from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
 from agentscope.pipeline import stream_printing_messages
 
-from prismclaw_guard import PrismClawGuardMixin, PendingStatus
+from prism_harness_guard import PrismHarnessGuardMixin, PendingStatus
 from session import Session, SessionManager, AgentRequest, SessionStatus
 from tools import (
     build_toolkit,
@@ -32,10 +32,10 @@ from context_viz import ContextViz, TokenStats
 from conf import FLAGS
 
 
-# ---- Mixin 组装：PrismClawAgent = PrismClawGuard + ReActAgent ----
+# ---- Mixin 组装：PrismHarnessAgent = PrismHarnessGuard + ReActAgent ----
 
-class PrismClawAgent(PrismClawGuardMixin, ReActAgent):
-    """PrismClaw Harness = ReActAgent + HITL 工具确认。"""
+class PrismHarnessAgent(PrismHarnessGuardMixin, ReActAgent):
+    """PrismHarness = ReActAgent + HITL 工具确认。"""
     pass
 
 
@@ -256,8 +256,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     # 包一层 model：每次真正调 API 前，把将要发送的上下文（原样）推向前端透明展示。
     # ctx_sink 是会话级可变对象，每轮请求把 emit 指到当轮 SSE 流（见下方 streaming）。
     ctx_sink: dict = {}
-    agent = PrismClawAgent(
-        name="PrismClaw",
+    agent = PrismHarnessAgent(
+        name="PrismHarness",
         sys_prompt=system_prompt,
         model=ModelContextProbe(model, ctx_sink),
         formatter=OpenAIChatFormatter(),
@@ -266,7 +266,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         max_iters=max_iters,
         parallel_tool_calls=cfg.get("agent", {}).get("parallel_tool_calls", True),
         compression_config=compression_config,
-        _prismclaw_sess=sess,
+        _prism_harness_sess=sess,
     )
     agent.set_console_output_enabled(False)
     await register_reasoning_hint(agent)
@@ -316,7 +316,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                 user_text = request.content
             viz.start_round(user_text)
 
-            # OpenClaw 式：每轮与 LLM 交互前，从当前文件重建 system prompt（persona/技能/画像），
+            # 热更新式：每轮与 LLM 交互前，从当前文件重建 system prompt（persona/技能/画像），
             # 并热更新到 agent —— 改 USER.md/AGENTS.md/SOUL.md 后下一轮立即真实生效；
             # 配合上下文探头，右侧光谱面板展示的也正是这份最新实际发送的 system prompt。
             system_prompt = format_system_prompt([], workspace_dir)
@@ -611,7 +611,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                     terminal_phase = "canceled"
                     await q.put({"cancel": True, "last": True, "contents": []})
                 except Exception as e:
-                    print(f"[PrismClaw] Error: {e}\n{traceback.format_exc()}")
+                    print(f"[PrismHarness] Error: {e}\n{traceback.format_exc()}")
                     terminal_phase = "error"
                     await q.put({
                         "type": "status",
@@ -663,7 +663,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             viz.commit()
 
         except Exception as e:
-            print(f"[PrismClaw] Runner error: {e}\n{traceback.format_exc()}")
+            print(f"[PrismHarness] Runner error: {e}\n{traceback.format_exc()}")
         finally:
             await response_q.put(None)
             await sess.finish_request(request)
