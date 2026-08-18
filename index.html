@@ -445,6 +445,13 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .pref-row .pr-label{font-size:13px;color:var(--text-primary)}
 .pref-row .pr-hint{font-size:11px;color:var(--text-tertiary);margin-top:2px}
 .btn.sm{padding:4px 10px;font-size:12px}
+
+/* ---- 两段式确认 / 内联新增 ---- */
+.btn.armed{background:var(--danger);border-color:var(--danger);color:#fff;font-weight:600}
+.add-provider-row{display:flex;align-items:center;gap:8px;margin:4px 0 10px}
+.add-provider-row .field{flex:1}
+.si-del.armed{color:var(--danger);font-weight:700}
+.li-del.armed{color:var(--danger);font-weight:700}
 </style>
 </head>
 <body>
@@ -594,13 +601,18 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
             <div class="setting-group">
               <div class="sg-title">模型提供商</div>
               <div class="provider-tabs" id="providerTabs"></div>
+              <div class="add-provider-row" id="addProviderRow" style="display:none">
+                <input class="field" id="newProviderInput" placeholder="输入新 provider 名称（如 deepseek / openai），回车添加" onkeydown="if(event.key==='Enter')confirmAddProvider()">
+                <button class="btn accent sm" onclick="confirmAddProvider()">添加</button>
+                <button class="btn sm" onclick="cancelAddProvider()">取消</button>
+              </div>
               <div class="setting-row">
                 <label for="curProvider">当前使用</label>
                 <select class="field" id="curProvider"></select>
               </div>
               <div class="setting-row">
                 <label>删除已选 provider</label>
-                <button class="btn danger sm" onclick="deleteActiveProvider()">🗑 删除「<span id="delProviderName"></span>」</button>
+                <button class="btn danger sm" id="deleteProviderBtn" onclick="deleteProviderClick(this)">🗑 删除「<span id="delProviderName"></span>」</button>
               </div>
               <div class="setting-hint">选择哪个 provider 作为当前模型。新增的 provider 会写入 config.yaml 的 <code>providers</code>。</div>
             </div>
@@ -1641,7 +1653,7 @@ function renderSessionList() {
     return `<div class="session-item${activeCls}" data-sid="${s.id}" onclick="switchSession('${s.id}')">
       <div class="si-title" title="${title}">${title || '新会话'}</div>
       <div class="si-time">${hh}:${mm}</div>
-      <span class="si-del" onclick="event.stopPropagation();deleteSession(event,'${s.id}')" title="删除会话">×</span>
+      <span class="si-del" onclick="event.stopPropagation();deleteSessionClick(this,'${s.id}')" title="删除会话">×</span>
     </div>`;
   }).join('');
 }
@@ -1731,9 +1743,11 @@ function restoreRuntimeState(rec) {
   } catch (e) { /* 忽略 */ }
 }
 
+function deleteSessionClick(el, id) {
+  twoStepConfirm(el, () => { deleteSession(null, id); }, '删除会话');
+}
 function deleteSession(ev, id) {
   if (ev) ev.stopPropagation();
-  if (!confirm('删除这个会话？')) return;
   let list = loadSessions();
   list = list.filter(s => s.id !== id);
   saveSessions(list);
@@ -1866,10 +1880,13 @@ function openSettings() {
   document.getElementById('settingsModal').classList.add('open');
   document.getElementById('settingsLoading').style.display = 'block';
   document.getElementById('settingsForm').style.display = 'none';
+  resetArmed();
   loadSettings();
 }
 
 function closeSettings() {
+  resetArmed();
+  document.getElementById('addProviderRow').style.display = 'none';
   document.getElementById('settingsModal').classList.remove('open');
 }
 
@@ -2002,34 +2019,84 @@ function renderProviderTabs() {
   });
   const add = document.createElement('button');
   add.className = 'add-provider'; add.textContent = '＋ 新增';
-  add.onclick = addProvider;
+  add.onclick = showAddProvider;
   tabs.appendChild(add);
   document.getElementById('delProviderName').textContent = settingsActiveProvider || '';
 }
 
-function addProvider() {
-  const raw = window.prompt('新增 provider 名称（英文标识，如 deepseek / openai）：');
-  if (!raw) return;
-  const name = raw.trim();
-  if (!name) return;
+// ====== 两段式确认（替代浏览器 confirm）：第一次点击武装成红色“确认”，再点才执行 ======
+const _armed = {}; // key -> { btn, timer }
+function twoStepConfirm(btn, run, tip) {
+  if (!btn) return;
+  const key = btn.dataset.confirmKey || (btn.id || ('b' + Math.random().toString(36).slice(2, 8)));
+  btn.dataset.confirmKey = key;
+  const origText = btn.dataset.origText || btn.textContent;
+  if (_armed[key]) {
+    clearTimeout(_armed[key].timer);
+    btn.classList.remove('armed');
+    btn.textContent = origText;
+    delete _armed[key];
+    run();
+    return;
+  }
+  btn.dataset.origText = origText;
+  btn.classList.add('armed');
+  btn.textContent = '确认' + (tip ? '「' + tip + '」？' : '？');
+  _armed[key] = { btn, timer: setTimeout(() => {
+    btn.classList.remove('armed');
+    btn.textContent = origText;
+    delete _armed[key];
+  }, 3500) };
+}
+// 切走/关闭设置时重置所有武装态
+function resetArmed() {
+  for (const k of Object.keys(_armed)) {
+    const s = _armed[k];
+    if (s && s.btn) { s.btn.classList.remove('armed'); s.btn.textContent = s.btn.dataset.origText || s.btn.textContent; }
+    clearTimeout(s.timer);
+    delete _armed[k];
+  }
+}
+
+// ====== 新增 provider（面板内文本框，替代 prompt） ======
+function showAddProvider() {
+  resetArmed();
+  document.getElementById('delProviderName').textContent = settingsActiveProvider || '';
+  const row = document.getElementById('addProviderRow');
+  const inp = document.getElementById('newProviderInput');
+  row.style.display = 'flex';
+  inp.value = '';
+  inp.focus();
+}
+function cancelAddProvider() {
+  document.getElementById('addProviderRow').style.display = 'none';
+  document.getElementById('newProviderInput').value = '';
+}
+function confirmAddProvider() {
+  const raw = document.getElementById('newProviderInput').value;
+  const name = (raw || '').trim();
+  if (!name) { showToast('请输入 provider 名称', 'error'); return; }
   if (settingsState.providers[name]) { showToast('该 provider 已存在', 'error'); return; }
   commitActiveProviderForm();
   settingsState.providers[name] = { api_key: '', api_base: '', model: '', enable_thinking: false };
   settingsActiveProvider = name;
+  cancelAddProvider();
   renderProviderTabs(); renderCurProviderSelect(); renderActiveProviderForm();
 }
 
-function deleteActiveProvider() {
+// ====== 删除 provider（两段式确认，替代 confirm） ======
+function deleteProviderClick(btn) {
   const name = settingsActiveProvider;
   if (!name || !settingsState.providers[name]) return;
-  if (!window.confirm('删除 provider「' + name + '」？\n（config.yaml 里的对应配置会被移除）')) return;
-  delete settingsState.providers[name];
-  const names = Object.keys(settingsState.providers);
-  if (settingsState.llm.provider === name) settingsState.llm.provider = names[0] || '';
-  settingsActiveProvider = settingsState.llm.provider || names[0] || '';
-  if (!settingsActiveProvider) { settingsState.providers[''] = { api_key: '', api_base: '', model: '', enable_thinking: false }; settingsActiveProvider = ''; }
-  renderProviderTabs(); renderCurProviderSelect(); renderActiveProviderForm();
-  saveSettings();
+  twoStepConfirm(btn, () => {
+    delete settingsState.providers[name];
+    const names = Object.keys(settingsState.providers);
+    if (settingsState.llm.provider === name) settingsState.llm.provider = names[0] || '';
+    settingsActiveProvider = settingsState.llm.provider || names[0] || '';
+    if (!settingsActiveProvider) { settingsState.providers[''] = { api_key: '', api_base: '', model: '', enable_thinking: false }; settingsActiveProvider = ''; }
+    renderProviderTabs(); renderCurProviderSelect(); renderActiveProviderForm();
+    saveSettings();
+  }, '删除 ' + name);
 }
 
 function renderCurProviderSelect() {
@@ -2185,7 +2252,7 @@ async function loadLogs() {
       '<div class="log-item" onclick="viewLog(\'' + l.name + '\')">' +
         '<span class="li-name">' + escapeHtml(l.name) + '</span>' +
         '<span class="li-meta">' + l.files.length + ' 文件 · ' + escapeHtml(l.mtime) + '</span>' +
-        '<span class="li-del" onclick="event.stopPropagation();deleteLog(\'' + l.name + '\')" title="删除整个会话">×</span>' +
+        '<span class="li-del" onclick="event.stopPropagation();deleteLogClick(this,\'' + l.name + '\')" title="删除整个会话">×</span>' +
       '</div>'
     ).join('');
   } catch (e) { listEl.innerHTML = '<div class="setting-hint">加载日志失败：' + escapeHtml(e.message) + '</div>'; }
@@ -2215,8 +2282,11 @@ async function viewLog(name) {
   } catch (e) { showToast('查看失败：' + e.message, 'error'); }
 }
 
+function deleteLogClick(el, name) {
+  twoStepConfirm(el, () => { deleteLog(name); }, '删除' + name + ' 日志');
+}
 async function deleteLog(name) {
-  if (!window.confirm('删除整个会话日志「' + name + '」？（不可恢复）')) return;
+
   try {
     const resp = await fetch('/api/logs/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: name }) });
     const r = await resp.json();
