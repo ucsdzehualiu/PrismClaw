@@ -1557,6 +1557,13 @@ function newSessionId() {
 // 捕获当前会话的界面快照（聊天/轨迹/上下文/工具面板）
 function capturePanelStates() {
   const traceView = document.getElementById('traceView');
+  let runtime = null;
+  try {
+    // 存一份紧凑的运行时状态（消息/工具调用），刷新后用于流式续接一致性。
+    const snap = { messages: messages, toolCalls: toolCalls };
+    const s = JSON.stringify(snap);
+    if (s && s.length < 400000) runtime = { messages: messages, toolCalls: toolCalls };
+  } catch (e) { runtime = null; }
   return {
     chatHTML: chatMessages.innerHTML,
     viewMode: traceViewMode,
@@ -1566,16 +1573,29 @@ function capturePanelStates() {
     contextEmptyShown: (document.getElementById('contextEmpty') || {}).style.display !== 'none',
     toolsHTML: (document.getElementById('toolsContent') || {}).innerHTML || '',
     pane: switchDetailPane._cur || 'context',
+    runtime: runtime,
   };
 }
 
 function saveCurrentSessionState() {
-  const rec = findSession(SESSION_ID) || { id: SESSION_ID, title: '新会话', createdAt: Date.now(), lastActive: Date.now() };
-  Object.assign(rec, {
-    title: deriveSessionTitle() || rec.title || '新会话',
-    lastActive: Date.now(),
-    ...capturePanelStates(),
-  });
+  const prev = findSession(SESSION_ID);
+  const rec = prev || { id: SESSION_ID, title: '新会话', createdAt: Date.now(), lastActive: Date.now() };
+  const panels = capturePanelStates();
+  rec.title = deriveSessionTitle() || rec.title || '新会话';
+  rec.lastActive = Date.now();
+
+  // 防丢数据保护：刷新后界面还没恢复出来时，空白快照不能覆盖已保存的内容。
+  const keepOld = !!prev && !!prev.chatHTML && !panels.chatHTML.trim();
+  if (keepOld) {
+    // 只更新元信息 / 视图状态 / 运行时，保留旧的 HTML 内容快照。
+    rec.viewMode = panels.viewMode;
+    rec.pane = panels.pane;
+    rec.runtime = panels.runtime;
+    if (panels.traceSummary) rec.traceSummary = panels.traceSummary;
+  } else {
+    Object.assign(rec, panels);
+  }
+
   // 控制快照体积，防止长会话把 localStorage 撑爆（各字段截断 + 总上限）
   const cap = (v, n) => (typeof v === 'string' && v.length > n) ? v.slice(0, n) : v;
   rec.chatHTML = cap(rec.chatHTML, MAX_SESSION_SNAP);
@@ -1680,7 +1700,13 @@ function switchSession(id) {
   sessionStorage.setItem(SESSION_STORAGE_KEY, id);
   setActiveSessionId(id);
   clearCurrentUI();
-  // 恢复目标会话界面
+  restoreSessionUI(rec);
+  renderSessionList();
+}
+
+// 把某会话的快照恢复到界面（切换会话 / 页面刷新后恢复当前会话都用它）
+function restoreSessionUI(rec) {
+  if (!rec) return;
   if (rec.chatHTML) document.getElementById('chatMessages').innerHTML = rec.chatHTML;
   const ts = document.getElementById('traceSummary'); if (ts && rec.traceSummary) ts.textContent = rec.traceSummary;
   const tl = document.getElementById('traceLog'); if (tl && rec.traceLog) tl.innerHTML = rec.traceLog;
@@ -1691,8 +1717,18 @@ function switchSession(id) {
   const tco = document.getElementById('toolsContent'); if (tco && rec.toolsHTML) tco.innerHTML = rec.toolsHTML;
   if (rec.viewMode) { try { switchView(rec.viewMode); } catch (e) {} }
   if (rec.pane) { try { switchDetailPane(rec.pane); } catch (e) {} }
-  renderSessionList();
-  scrollChat();
+  // 恢复运行时辅助状态，保证后续流式/重新保存正常
+  restoreRuntimeState(rec);
+}
+
+// 从快照还原部分运行时状态（toolCalls/messages 等用于渲染；尽力而为）
+function restoreRuntimeState(rec) {
+  try {
+    if (rec.runtime) {
+      if (Array.isArray(rec.runtime.messages)) messages = rec.runtime.messages;
+      if (Array.isArray(rec.runtime.toolCalls)) toolCalls = rec.runtime.toolCalls;
+    }
+  } catch (e) { /* 忽略 */ }
 }
 
 function deleteSession(ev, id) {
@@ -2045,13 +2081,14 @@ async function saveSettings() {
 
 // ---------- 人格 ----------
 function renderPersonas() {
+  // 每次都用服务器最新值填充，避免文本域残留旧值导致“改完不刷新/不生效”。
   const p = settingsPersonas || {};
-  setVal('pa_agents', p.agents || '');
-  setVal('pa_soul', p.soul || '');
-  setVal('pa_user', p.user || '');
-  setVal('pa_identity', p.identity || '');
+  const setP = (id, v) => { const el = document.getElementById(id); if (el) el.value = (v === undefined ? '' : v); };
+  setP('pa_agents', p.agents);
+  setP('pa_soul', p.soul);
+  setP('pa_user', p.user);
+  setP('pa_identity', p.identity);
 }
-function setVal(id, v) { const el = document.getElementById(id); if (el && el.value === '') el.value = v; }
 
 async function savePersonas() {
   const targets = [
@@ -2266,6 +2303,12 @@ userInput.focus();
   }
   setActiveSessionId(SESSION_ID);
   renderSessionList();
+
+  // 刷新后恢复当前活动会话的快照到界面（否则刷完聊天/轨迹是空的）
+  const activeRec = findSession(SESSION_ID);
+  if (activeRec && activeRec.chatHTML) {
+    restoreSessionUI(activeRec);
+  }
 
   // 防抖保存：聊天/轨迹/上下文/工具任一 DOM 变化 → 定时快照当前会话
   let snapTimer = null;
