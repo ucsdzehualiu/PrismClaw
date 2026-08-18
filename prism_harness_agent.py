@@ -256,10 +256,11 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     # 包一层 model：每次真正调 API 前，把将要发送的上下文（原样）推向前端透明展示。
     # ctx_sink 是会话级可变对象，每轮请求把 emit 指到当轮 SSE 流（见下方 streaming）。
     ctx_sink: dict = {}
+    probe = ModelContextProbe(model, ctx_sink)
     agent = PrismHarnessAgent(
         name="PrismHarness",
         sys_prompt=system_prompt,
-        model=ModelContextProbe(model, ctx_sink),
+        model=probe,
         formatter=OpenAIChatFormatter(),
         toolkit=toolkit,
         memory=InMemoryMemory(),
@@ -269,6 +270,51 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         _prism_harness_sess=sess,
     )
     agent.set_console_output_enabled(False)
+
+    # 记录当前 LLM 配置签名，用于每轮热重载判断是否需要重建 model。
+    last_llm_sig = None
+
+    def apply_llm_config(new_cfg: dict):
+        """若 LLM 配置（provider/endpoint/model/api_key/thinking/temperature）变化，
+        则重建 model/token_counter 并热替换到 probe 与 agent 上，下一轮请求立即生效。"""
+        nonlocal model, token_counter, compression_config, last_llm_sig
+        sig = (
+            new_cfg.get("llm", {}).get("provider"),
+            new_cfg.get("providers", {}),
+        )
+        if sig == last_llm_sig:
+            return False
+        last_llm_sig = sig
+        model = build_model(new_cfg, stream=True)
+        token_counter = build_token_counter(new_cfg)
+        probe._probe_model = model
+        # 防御性替换：这些属性若不存在则跳过，不阻塞主流程
+        for attr in ("token_counter", "compression_config", "max_iters"):
+            if hasattr(agent, attr):
+                try:
+                    setattr(agent, attr, getattr(agent, attr))
+                except Exception:
+                    pass
+        agent.token_counter = token_counter
+        compression_config = None
+        n_ctx = new_cfg.get("context", {})
+        if n_ctx.get("compress_threshold") and hasattr(agent, "compression_config"):
+            compression_config = ReActAgent.CompressionConfig(
+                enable=True,
+                agent_token_counter=token_counter,
+                trigger_threshold=int(
+                    new_cfg.get("context", {}).get("token_budget", 32000)
+                    * float(n_ctx.get("compress_threshold", 0.8)),
+                ),
+                keep_recent=int(n_ctx.get("keep_recent_messages", 6)),
+            )
+            try:
+                agent.compression_config = compression_config
+            except Exception:
+                pass
+        return True
+
+    apply_llm_config(cfg)  # 初始化签名
     await register_reasoning_hint(agent)
     await register_keepalive(agent, sess)
     await register_thinking_cleanup(agent)
@@ -281,6 +327,15 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             break
 
         await sess.activate()
+
+        # 热重载：每轮请求前重读 config.yaml，若模型/API Key 等 LLM 配置有变，
+        # 立即重建 model 并热替换——设置页改完下一轮消息马上生效，无需重启。
+        try:
+            fresh_cfg = load_config()
+            apply_llm_config(fresh_cfg)
+        except Exception:
+            pass  # 读/建失败则沿用现有模型，不中断本轮回话
+
         # 每轮重建 toolkit，让 manage_skill 新建的技能无需重启即可出现在
         # ReActAgent.sys_prompt 动态附加的官方 Skills 提示词中。
         agent.toolkit = await build_toolkit(workspace_dir)

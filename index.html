@@ -348,6 +348,103 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
   .panel-chat{border-right:none}
   .panel-details{min-height:900px;border-left:none;border-top:1px solid var(--border-l1)}
 }
+
+/* ---- Settings modal ---- */
+.modal-overlay{position:fixed;inset:0;background:rgba(10,10,12,0.62);backdrop-filter:blur(2px);
+  display:none;align-items:center;justify-content:center;z-index:1000;padding:24px}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg-layer-1);border:1px solid var(--border-l2);border-radius:14px;
+  width:680px;max-width:100%;max-height:90vh;display:flex;flex-direction:column;overflow:hidden;
+  box-shadow:0 24px 60px rgba(0,0,0,0.5)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;padding:16px 20px;
+  border-bottom:1px solid var(--border-l1)}
+.modal-header h3{font-size:15px;font-weight:600;color:var(--text-primary);display:flex;align-items:center;gap:8px}
+.modal-close{background:transparent;border:none;color:var(--text-tertiary);font-size:20px;line-height:1;
+  cursor:pointer;padding:2px 6px;border-radius:6px}
+.modal-close:hover{color:var(--text-primary);background:var(--bg-layer-2)}
+.modal-body{padding:18px 20px;overflow-y:auto;flex:1}
+.modal-body::-webkit-scrollbar{width:6px}
+.modal-body::-webkit-scrollbar-thumb{background:var(--border-l2);border-radius:3px}
+.modal-footer{display:flex;align-items:center;justify-content:flex-end;gap:10px;padding:14px 20px;
+  border-top:1px solid var(--border-l1)}
+.setting-group{margin-bottom:20px}
+.setting-group > .sg-title{font-size:11px;text-transform:uppercase;letter-spacing:0.06em;
+  color:var(--text-tertiary);font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:8px}
+.setting-row{display:flex;flex-direction:column;gap:5px;margin-bottom:12px}
+.setting-row label{font-size:12.5px;color:var(--text-secondary);font-weight:500}
+.setting-row label .hint{color:var(--text-tertiary);font-weight:400;font-size:11px;margin-left:6px}
+.setting-row .field{background:var(--bg-input);border:1px solid var(--border-l2);color:var(--text-primary);
+  padding:9px 12px;border-radius:var(--radius-sm);font-size:13px;font-family:var(--font-sans);width:100%}
+.setting-row .field:focus{outline:none;border-color:var(--accent-strong);box-shadow:0 0 0 3px var(--accent-glow)}
+.setting-row select.field{cursor:pointer;appearance:auto}
+.setting-hint{font-size:11px;color:var(--text-tertiary);margin-top:-7px;margin-bottom:12px;line-height:1.6}
+.provider-tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.provider-tab{padding:5px 12px;border-radius:20px;border:1px solid var(--border-l2);background:var(--bg-layer-2);
+  color:var(--text-secondary);font-size:12px;cursor:pointer;font-weight:500;transition:all var(--transition)}
+.provider-tab.active{background:var(--accent-strong);border-color:var(--accent-strong);color:#fff}
+.add-provider{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:20px;
+  border:1px dashed var(--border-l3);background:transparent;color:var(--text-tertiary);font-size:12px;
+  cursor:pointer;transition:all var(--transition)}
+.add-provider:hover{color:var(--accent);border-color:var(--accent)}
+.toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(20px);z-index:1200;
+  background:var(--bg-layer-3);color:var(--text-primary);border:1px solid var(--border-l2);
+  border-radius:var(--radius-sm);padding:10px 16px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,0.4);
+  opacity:0;pointer-events:none;transition:opacity .25s var(--ease),transform .25s var(--ease)}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.error{border-color:var(--danger);color:var(--danger)}
+.toast.success{border-color:var(--success);color:var(--success)}
+.modal-loading{color:var(--text-tertiary);padding:24px;text-align:center}
+
+/* ---- Settings tabs ---- */
+.settings-tabs{display:flex;gap:2px;padding:0 20px;border-bottom:1px solid var(--border-l1);
+  background:var(--bg-layer-1);flex-shrink:0;overflow-x:auto}
+.settings-tab{padding:11px 14px;border:none;background:transparent;color:var(--text-tertiary);
+  cursor:pointer;font-size:13px;border-bottom:2px solid transparent;font-weight:500;white-space:nowrap;
+  transition:color var(--transition),border-color var(--transition)}
+.settings-tab:hover{color:var(--text-primary)}
+.settings-tab.active{color:var(--text-primary);border-bottom-color:var(--accent-strong)}
+.settings-panels{flex:1;overflow-y:auto;padding:18px 20px}
+.settings-panels::-webkit-scrollbar{width:6px}
+.settings-panels::-webkit-scrollbar-thumb{background:var(--border-l2);border-radius:3px}
+.settings-panel{display:none}
+.settings-panel.active{display:block}
+.overview-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px}
+.ov-item{background:var(--bg-layer-2);border:1px solid var(--border-l1);border-radius:var(--radius-sm);padding:12px}
+.ov-item .ov-label{font-size:11px;text-transform:uppercase;letter-spacing:0.05em;color:var(--text-tertiary);margin-bottom:5px}
+.ov-item .ov-value{font-family:var(--font-mono);font-size:13px;color:var(--text-primary);word-break:break-all}
+.ov-item .ov-ok{color:var(--success)} .ov-item .ov-missing{color:var(--warn)}
+.test-result{margin-top:10px;padding:10px 12px;border-radius:var(--radius-sm);font-family:var(--font-mono);font-size:12px;white-space:pre-wrap;word-break:break-word}
+.test-result.ok{background:var(--success-soft);border:1px solid var(--success);color:var(--success)}
+.test-result.err{background:var(--danger-soft);border:1px solid var(--danger);color:#fca5a5}
+.persona-editor{margin-bottom:16px}
+.persona-editor .pe-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.persona-editor .pe-head .pe-name{font-size:12.5px;font-weight:600;color:var(--text-primary)}
+.persona-editor textarea{width:100%;height:120px;background:var(--bg-input);border:1px solid var(--border-l2);
+  color:var(--text-primary);border-radius:var(--radius-sm);padding:10px 12px;font-family:var(--font-mono);
+  font-size:12px;resize:vertical;line-height:1.55}
+.persona-editor textarea:focus{outline:none;border-color:var(--accent-strong);box-shadow:0 0 0 3px var(--accent-glow)}
+.feature-check{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--bg-layer-2);
+  border:1px solid var(--border-l1);border-radius:var(--radius-sm);margin-bottom:8px;cursor:pointer}
+.feature-check input{width:16px;height:16px;accent-color:var(--accent-strong);cursor:pointer}
+.feature-check .fc-name{font-size:13px;color:var(--text-primary);font-weight:500}
+.feature-check .fc-desc{font-size:11.5px;color:var(--text-tertiary)}
+.feature-check.checked{border-color:var(--accent-strong)}
+.logs-list{display:flex;flex-direction:column;gap:6px}
+.log-item{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg-layer-2);
+  border:1px solid var(--border-l1);border-radius:var(--radius-sm);cursor:pointer;transition:border-color var(--transition)}
+.log-item:hover{border-color:var(--border-l3)}
+.log-item .li-name{font-family:var(--font-mono);font-size:12.5px;color:var(--text-primary);flex-shrink:0}
+.log-item .li-meta{font-size:11px;color:var(--text-tertiary);margin-left:auto;white-space:nowrap}
+.log-item .li-del{font-size:15px;color:var(--text-tertiary);cursor:pointer;padding:0 4px;border-radius:4px;flex-shrink:0}
+.log-item .li-del:hover{color:var(--danger)}
+.log-viewer{margin-top:12px;background:#101013;border:1px solid var(--border-l1);border-radius:var(--radius-sm);overflow:hidden}
+.log-viewer .lv-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;border-bottom:1px solid var(--border-l1);font-size:12px;color:var(--text-tertiary)}
+.log-viewer pre{max-height:320px;overflow:auto;padding:12px;font-family:var(--font-mono);font-size:11.5px;color:var(--text-tertiary);white-space:pre-wrap;word-break:break-word}
+.pref-row{display:flex;align-items:center;justify-content:space-between;padding:11px 4px;border-bottom:1px solid var(--border-l1)}
+.pref-row:last-child{border-bottom:none}
+.pref-row .pr-label{font-size:13px;color:var(--text-primary)}
+.pref-row .pr-hint{font-size:11px;color:var(--text-tertiary);margin-top:2px}
+.btn.sm{padding:4px 10px;font-size:12px}
 </style>
 </head>
 <body>
@@ -363,6 +460,7 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
       <span id="statusBadge" class="badge thinking">就绪</span>
       <span id="liveStatus" class="badge" style="display:none"></span>
       <button class="btn danger" id="stopBtn" onclick="stopGeneration()" style="display:none" title="打断当前生成">⏹ 停止</button>
+      <button class="btn" id="settingsBtn" onclick="openSettings()" title="模型 / API Key / 参数设置" style="font-size:15px;line-height:1;padding:5px 9px">⚙️</button>
     </div>
   </div>
 
@@ -442,6 +540,180 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
     </div>
   </div>
 </div>
+
+<!-- Settings modal (⚙️) -->
+<div class="modal-overlay" id="settingsModal" onclick="if(event.target===this)closeSettings()">
+  <div class="modal">
+    <div class="modal-header">
+      <h3>⚙️ 设置 — 模型 / API Key</h3>
+      <button class="modal-close" onclick="closeSettings()" title="关闭">×</button>
+    </div>
+    <div class="modal-body" id="settingsBody">
+      <div class="modal-loading" id="settingsLoading">加载配置中…</div>
+      <div id="settingsForm" style="display:none">
+        <div class="settings-tabs">
+          <button class="settings-tab active" data-tab="overview" onclick="switchSettingsTab('overview')">概览</button>
+          <button class="settings-tab" data-tab="model" onclick="switchSettingsTab('model')">模型</button>
+          <button class="settings-tab" data-tab="personas" onclick="switchSettingsTab('personas')">人格</button>
+          <button class="settings-tab" data-tab="features" onclick="switchSettingsTab('features')">功能开关</button>
+          <button class="settings-tab" data-tab="logs" onclick="switchSettingsTab('logs')">日志</button>
+          <button class="settings-tab" data-tab="prefs" onclick="switchSettingsTab('prefs')">偏好</button>
+        </div>
+        <div class="settings-panels">
+
+          <!-- 概览 -->
+          <div class="settings-panel active" data-panel="overview">
+            <div class="setting-group">
+              <div class="sg-title">当前模型配置</div>
+              <div class="overview-grid">
+                <div class="ov-item"><div class="ov-label">Provider</div><div class="ov-value" id="ov_provider">-</div></div>
+                <div class="ov-item"><div class="ov-label">模型</div><div class="ov-value" id="ov_model">-</div></div>
+                <div class="ov-item"><div class="ov-label">API 地址</div><div class="ov-value" id="ov_api_base">-</div></div>
+                <div class="ov-item"><div class="ov-label">API Key</div><div class="ov-value" id="ov_api_key">-</div></div>
+                <div class="ov-item"><div class="ov-label">Temperature</div><div class="ov-value" id="ov_temp">-</div></div>
+                <div class="ov-item"><div class="ov-label">思考 (thinking)</div><div class="ov-value" id="ov_thinking">-</div></div>
+              </div>
+            </div>
+            <div class="setting-group">
+              <div class="sg-title">环境 / 依赖</div>
+              <div class="overview-grid">
+                <div class="ov-item"><div class="ov-label">Python</div><div class="ov-value" id="ov_python">-</div></div>
+                <div class="ov-item"><div class="ov-label">配置文件</div><div class="ov-value" id="ov_config">-</div></div>
+                <div class="ov-item"><div class="ov-label">功能开关</div><div class="ov-value" id="ov_features">-</div></div>
+                <div class="ov-item"><div class="ov-label">活动会话 / 受控工具</div><div class="ov-value" id="ov_sessions">-</div></div>
+              </div>
+            </div>
+            <div class="setting-group">
+              <button class="btn accent" onclick="testModel()" id="testBtn">📡 测试模型连通性</button>
+              <div class="test-result" id="testResult" style="display:none"></div>
+            </div>
+          </div>
+
+          <!-- 模型 -->
+          <div class="settings-panel" data-panel="model">
+            <div class="setting-group">
+              <div class="sg-title">模型提供商</div>
+              <div class="provider-tabs" id="providerTabs"></div>
+              <div class="setting-row">
+                <label for="curProvider">当前使用</label>
+                <select class="field" id="curProvider"></select>
+              </div>
+              <div class="setting-row">
+                <label>删除已选 provider</label>
+                <button class="btn danger sm" onclick="deleteActiveProvider()">🗑 删除「<span id="delProviderName"></span>」</button>
+              </div>
+              <div class="setting-hint">选择哪个 provider 作为当前模型。新增的 provider 会写入 config.yaml 的 <code>providers</code>。</div>
+            </div>
+            <div class="setting-group">
+              <div class="sg-title">当前 provider 的接口配置</div>
+              <div class="setting-row">
+                <label for="p_model">模型名 (model)</label>
+                <input class="field" id="p_model" placeholder="如 dsv4 / qwen3.6-35b-a3b">
+              </div>
+              <div class="setting-row">
+                <label for="p_api_base">API 地址 (api_base)</label>
+                <input class="field" id="p_api_base" placeholder="http://host:port/v1">
+              </div>
+              <div class="setting-row">
+                <label for="p_api_key">API Key <span class="hint" id="keyHint"></span></label>
+                <input class="field" id="p_api_key" type="password" placeholder="sk-...">
+              </div>
+              <div class="setting-row">
+                <label>启用思考 (enable_thinking)</label>
+                <select class="field" id="p_enable_thinking">
+                  <option value="true">开启</option>
+                  <option value="false">关闭</option>
+                </select>
+              </div>
+            </div>
+            <div class="setting-group">
+              <div class="sg-title">LLM / Agent 参数</div>
+              <div class="setting-row">
+                <label for="llm_temperature">Temperature</label>
+                <input class="field" id="llm_temperature" type="number" step="0.1" min="0" max="2">
+              </div>
+              <div class="setting-row">
+                <label for="agent_iters">最大迭代轮数 (max_iters)</label>
+                <input class="field" id="agent_iters" type="number" step="1" min="1">
+              </div>
+            </div>
+          </div>
+
+          <!-- 人格 -->
+          <div class="settings-panel" data-panel="personas">
+            <div class="setting-hint">这些人格文件会拼进每轮 System Prompt。改完点「保存人格」立即在下一条消息生效（无需重启）。</div>
+            <div class="persona-editor">
+              <div class="pe-head"><span class="pe-name">AGENTS.md — Agent 行为准则</span></div>
+              <textarea id="pa_agents" spellcheck="false"></textarea>
+            </div>
+            <div class="persona-editor">
+              <div class="pe-head"><span class="pe-name">SOUL.md — 人格 / 语气</span></div>
+              <textarea id="pa_soul" spellcheck="false"></textarea>
+            </div>
+            <div class="persona-editor">
+              <div class="pe-head"><span class="pe-name">USER.md — 用户画像</span></div>
+              <textarea id="pa_user" spellcheck="false"></textarea>
+            </div>
+            <div class="persona-editor">
+              <div class="pe-head"><span class="pe-name">IDENTITY.md — 身份</span></div>
+              <textarea id="pa_identity" spellcheck="false"></textarea>
+            </div>
+            <button class="btn accent" onclick="savePersonas()">💾 保存人格</button>
+          </div>
+
+          <!-- 功能开关 -->
+          <div class="settings-panel" data-panel="features">
+            <div class="setting-group">
+              <div class="sg-title">工具 / 能力开关（保存即热生效，下一轮生效）</div>
+              <div id="featureList"></div>
+            </div>
+            <div class="setting-group">
+              <div class="sg-title">需要人工确认 (HITL) 的工具</div>
+              <div class="setting-hint">勾选后，调用这些工具会弹出确认卡片。</div>
+              <div id="guardList"></div>
+            </div>
+            <button class="btn accent" onclick="saveFeatures()">💾 保存功能开关</button>
+          </div>
+
+          <!-- 日志 -->
+          <div class="settings-panel" data-panel="logs">
+            <div class="setting-hint">session_logs/ 下的会话轨迹。点击查看，× 删除整个会话。</div>
+            <div id="logsList" class="logs-list"><div class="modal-loading">加载日志…</div></div>
+          </div>
+
+          <!-- 偏好 -->
+          <div class="settings-panel" data-panel="prefs">
+            <div class="setting-group">
+              <div class="sg-title">界面偏好（保存在本浏览器 localStorage）</div>
+              <div class="pref-row">
+                <div><div class="pr-label">聊天气泡字号</div><div class="pr-hint">影响对话区的文字大小</div></div>
+                <select class="field" id="pref_fontsize" style="width:130px">
+                  <option value="13">小 (13px)</option>
+                  <option value="14">中 (14px)</option>
+                  <option value="16">大 (16px)</option>
+                </select>
+              </div>
+              <div class="pref-row">
+                <div><div class="pr-label">显示实时状态徽标</div><div class="pr-hint">顶部“正在思考/执行工具”状态条</div></div>
+                <input type="checkbox" id="pref_livestatus" style="width:18px;height:18px;accent-color:var(--accent-strong)">
+              </div>
+            </div>
+            <button class="btn accent" onclick="savePrefs()">💾 保存偏好</button>
+          </div>
+
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <span id="saveHint" style="font-size:11px;color:var(--text-tertiary);margin-right:auto"></span>
+      <button class="btn" onclick="closeSettings()">关闭</button>
+      <button class="btn accent" onclick="saveSettings()">💾 保存模型配置</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast -->
+<div class="toast" id="toast"></div>
 
 <script>
 // ====== State ======
@@ -1540,6 +1812,445 @@ function renderMarkdown(text) {
   return s;
 }
 
+// ====== Settings modal (⚙️) ======
+let settingsState = null;            // { llm, providers, agent }
+let settingsActiveProvider = '';
+let settingsFeatures = null;         // { flags, guard_tools, guard_timeout }
+let settingsPersonas = null;         // { agents, soul, user, identity }
+
+function showToast(msg, type) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast show ' + (type || '');
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.className = 'toast ' + (type || ''), 2600);
+}
+
+function openSettings() {
+  document.getElementById('settingsModal').classList.add('open');
+  document.getElementById('settingsLoading').style.display = 'block';
+  document.getElementById('settingsForm').style.display = 'none';
+  loadSettings();
+}
+
+function closeSettings() {
+  document.getElementById('settingsModal').classList.remove('open');
+}
+
+function switchSettingsTab(tab) {
+  document.querySelectorAll('.settings-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.tab === tab);
+  });
+  document.querySelectorAll('.settings-panel').forEach(p => {
+    p.classList.toggle('active', p.dataset.panel === tab);
+  });
+  if (tab === 'personas' && settingsPersonas) renderPersonas();
+  if (tab === 'features' && settingsFeatures) renderFeatures();
+  if (tab === 'logs') loadLogs();
+  if (tab === 'prefs') renderPrefs();
+}
+
+async function loadSettings() {
+  loadPrefs();
+  try {
+    const [cfgRes, statusRes, persRes, flagsRes] = await Promise.all([
+      fetch('/api/config'), fetch('/api/status'), fetch('/get_personas'), fetch('/api/flags'),
+    ]);
+    const data = await cfgRes.json();
+    settingsState = { llm: data.llm || {}, providers: data.providers || {}, agent: data.agent || {} };
+    const names = Object.keys(settingsState.providers);
+    if (!names.includes(settingsState.llm.provider)) settingsState.llm.provider = names[0] || '';
+    settingsActiveProvider = settingsState.llm.provider || names[0] || '';
+    settingsPersonas = await persRes.json();
+    settingsFeatures = await flagsRes.json();
+
+    document.getElementById('settingsLoading').style.display = 'none';
+    document.getElementById('settingsForm').style.display = 'block';
+
+    renderProviderTabs();
+    renderCurProviderSelect();
+    renderActiveProviderForm();
+    fillGlobalFields();
+    renderOverview(statusRes.status === 200 ? await statusRes.json() : {});
+    renderPersonas();
+    renderFeatures();
+    renderPrefs();
+  } catch (e) {
+    document.getElementById('settingsLoading').textContent = '加载配置失败：' + e.message;
+    showToast('加载配置失败：' + e.message, 'error');
+  }
+}
+
+// ---------- 概览 ----------
+function renderOverview(st) {
+  const llm = st.llm || {};
+  setOv('ov_provider', llm.provider || '-');
+  setOv('ov_model', llm.model || '-');
+  setOv('ov_api_base', llm.api_base || '-');
+  const keyEl = document.getElementById('ov_api_key');
+  if (keyEl) {
+    keyEl.textContent = llm.has_api_key ? '已配置' : '未设置';
+    keyEl.className = 'ov-value ' + (llm.has_api_key ? 'ov-ok' : 'ov-missing');
+  }
+  setOv('ov_temp', llm.temperature != null ? String(llm.temperature) : '-');
+  setOv('ov_thinking', llm.enable_thinking ? '开启' : '关闭');
+  const env = st.env || {};
+  setOv('ov_python', env.python ? env.python + ' (' + (env.python_exe || '').split(/[\\/]/).pop() + ')' : '-');
+  const cfgEl = document.getElementById('ov_config');
+  if (cfgEl) {
+    cfgEl.textContent = env.config_writable ? '可写' : '只读';
+    cfgEl.className = 'ov-value ' + (env.config_writable ? 'ov-ok' : 'ov-missing');
+  }
+  const feats = st.features || {};
+  setOv('ov_features', feats.enabled ? feats.enabled.length + '/' + feats.total + ' 启用' : '-');
+  setOv('ov_sessions', (st.session_count != null ? st.session_count + ' 会话' : '-') + ' · ' + (st.guard_count != null ? st.guard_count : '?') + ' 受控工具');
+}
+function setOv(id, val) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = val;
+}
+
+async function testModel() {
+  commitActiveProviderForm();
+  const p = settingsState.providers[settingsActiveProvider] || {};
+  const btn = document.getElementById('testBtn');
+  const res = document.getElementById('testResult');
+  btn.disabled = true; btn.textContent = '⏳ 测试中…';
+  res.style.display = 'block'; res.className = 'test-result'; res.textContent = '正在请求 ' + (p.api_base || '') + ' …';
+  try {
+    const resp = await fetch('/api/test_model', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        provider: settingsActiveProvider,
+        api_base: p.api_base, api_key: (p.api_key || '').trim() || null, model: p.model,
+      }),
+    });
+    const r = await resp.json();
+    if (r.status === 'success') {
+      res.className = 'test-result ok';
+      res.textContent = '✅ 连通成功 · 延迟 ' + r.latency_ms + 'ms' +
+        ((r.model ? '\n模型: ' + r.model : '')) + '\n回复: ' + (r.reply || '');
+    } else {
+      res.className = 'test-result err';
+      res.textContent = '❌ 连接失败: ' + (r.message || '未知错误');
+    }
+  } catch (e) {
+    res.className = 'test-result err';
+    res.textContent = '❌ 请求出错: ' + e.message;
+  } finally {
+    btn.disabled = false; btn.textContent = '📡 测试模型连通性';
+  }
+}
+
+// ---------- 模型 ----------
+function commitActiveProviderForm() {
+  const p = settingsState.providers[settingsActiveProvider];
+  if (!p) return;
+  p.model = document.getElementById('p_model').value.trim();
+  p.api_base = document.getElementById('p_api_base').value.trim();
+  p.api_key = document.getElementById('p_api_key').value;
+  p.enable_thinking = document.getElementById('p_enable_thinking').value === 'true';
+}
+
+function renderProviderTabs() {
+  const tabs = document.getElementById('providerTabs');
+  tabs.innerHTML = '';
+  const names = Object.keys(settingsState.providers);
+  names.forEach(n => {
+    const b = document.createElement('button');
+    b.className = 'provider-tab' + (n === settingsActiveProvider ? ' active' : '');
+    b.textContent = n + (n === settingsState.llm.provider ? ' ●' : '');
+    b.title = n + (n === settingsState.llm.provider ? '（当前使用）' : '');
+    b.onclick = () => { commitActiveProviderForm(); settingsActiveProvider = n; renderProviderTabs(); renderActiveProviderForm(); };
+    tabs.appendChild(b);
+  });
+  const add = document.createElement('button');
+  add.className = 'add-provider'; add.textContent = '＋ 新增';
+  add.onclick = addProvider;
+  tabs.appendChild(add);
+  document.getElementById('delProviderName').textContent = settingsActiveProvider || '';
+}
+
+function addProvider() {
+  const raw = window.prompt('新增 provider 名称（英文标识，如 deepseek / openai）：');
+  if (!raw) return;
+  const name = raw.trim();
+  if (!name) return;
+  if (settingsState.providers[name]) { showToast('该 provider 已存在', 'error'); return; }
+  commitActiveProviderForm();
+  settingsState.providers[name] = { api_key: '', api_base: '', model: '', enable_thinking: false };
+  settingsActiveProvider = name;
+  renderProviderTabs(); renderCurProviderSelect(); renderActiveProviderForm();
+}
+
+function deleteActiveProvider() {
+  const name = settingsActiveProvider;
+  if (!name || !settingsState.providers[name]) return;
+  if (!window.confirm('删除 provider「' + name + '」？\n（config.yaml 里的对应配置会被移除）')) return;
+  delete settingsState.providers[name];
+  const names = Object.keys(settingsState.providers);
+  if (settingsState.llm.provider === name) settingsState.llm.provider = names[0] || '';
+  settingsActiveProvider = settingsState.llm.provider || names[0] || '';
+  if (!settingsActiveProvider) { settingsState.providers[''] = { api_key: '', api_base: '', model: '', enable_thinking: false }; settingsActiveProvider = ''; }
+  renderProviderTabs(); renderCurProviderSelect(); renderActiveProviderForm();
+  saveSettings();
+}
+
+function renderCurProviderSelect() {
+  const sel = document.getElementById('curProvider');
+  const names = Object.keys(settingsState.providers);
+  sel.innerHTML = '';
+  names.forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; sel.appendChild(o); });
+  sel.value = settingsState.llm.provider || '';
+  sel.onchange = () => { settingsState.llm.provider = sel.value; renderProviderTabs(); };
+}
+
+function renderActiveProviderForm() {
+  const p = settingsState.providers[settingsActiveProvider] || {};
+  document.getElementById('p_model').value = p.model || '';
+  document.getElementById('p_api_base').value = p.api_base || '';
+  document.getElementById('p_api_key').value = p.api_key || '';
+  const keyLen = (p.api_key || '').length;
+  document.getElementById('keyHint').textContent = keyLen ? '(已配置，' + keyLen + ' 字符)' : '(未设置)';
+  document.getElementById('p_enable_thinking').value = String(p.enable_thinking === true);
+  document.getElementById('delProviderName').textContent = settingsActiveProvider || '';
+}
+
+function fillGlobalFields() {
+  document.getElementById('llm_temperature').value = settingsState.llm.temperature != null ? settingsState.llm.temperature : 0.0;
+  document.getElementById('agent_iters').value = (settingsState.agent && settingsState.agent.max_iters) != null ? settingsState.agent.max_iters : 30;
+}
+
+async function saveSettings() {
+  commitActiveProviderForm();
+  settingsState.llm.provider = document.getElementById('curProvider').value;
+  settingsState.llm.temperature = parseFloat(document.getElementById('llm_temperature').value) || 0.0;
+  if (!settingsState.agent) settingsState.agent = {};
+  settingsState.agent.max_iters = parseInt(document.getElementById('agent_iters').value, 10) || 30;
+  const payload = {
+    llm: { provider: settingsState.llm.provider, temperature: settingsState.llm.temperature },
+    providers: settingsState.providers,
+    agent: { max_iters: settingsState.agent.max_iters },
+  };
+  const btn = document.querySelector('#settingsModal .btn.accent');
+  btn.disabled = true; btn.textContent = '保存中…';
+  try {
+    const resp = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const r = await resp.json();
+    if (r.status !== 'success') { showToast('保存失败：' + (r.message || '未知错误'), 'error'); }
+    else { showToast('✅ 已保存并热重载，下一轮消息生效', 'success'); updateSidebarModel(); }
+  } catch (e) { showToast('保存失败：' + e.message, 'error'); }
+  finally { btn.disabled = false; btn.textContent = '💾 保存模型配置'; }
+}
+
+// ---------- 人格 ----------
+function renderPersonas() {
+  const p = settingsPersonas || {};
+  setVal('pa_agents', p.agents || '');
+  setVal('pa_soul', p.soul || '');
+  setVal('pa_user', p.user || '');
+  setVal('pa_identity', p.identity || '');
+}
+function setVal(id, v) { const el = document.getElementById(id); if (el && el.value === '') el.value = v; }
+
+async function savePersonas() {
+  const targets = [
+    ['agents', 'pa_agents'], ['soul', 'pa_soul'], ['user', 'pa_user'], ['identity', 'pa_identity'],
+  ];
+  try {
+    for (const [target, id] of targets) {
+      await fetch('/update_persona', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target, content: document.getElementById(id).value }),
+      });
+    }
+    showToast('✅ 人格已保存，下一条消息生效', 'success');
+    // 更新本地 + 侧边栏
+    const pr = await fetch('/get_personas'); settingsPersonas = await pr.json();
+  } catch (e) { showToast('保存人格失败：' + e.message, 'error'); }
+}
+
+// ---------- 功能开关 ----------
+const FEATURE_LABELS = {
+  enable_view_text_file: ['读取文件', 'view_text_file'],
+  enable_write_text_file: ['写入文件', 'write_text_file'],
+  enable_insert_text_file: ['插入/追加文件', 'insert_text_file'],
+  enable_execute_shell_command: ['执行 Shell 命令', 'run_shell'],
+  enable_download: ['文件下载', 'download_file'],
+  enable_websearch: ['联网搜索 + 网页抓取', 'web_search / web_fetch'],
+  enable_subagent: ['子代理', 'subagent'],
+  enable_cron: ['定时任务', 'cron'],
+  enable_sandbox: ['沙箱隔离', 'sandbox'],
+  enable_skills: ['技能系统', 'skills'],
+  enable_skill_auto_discover: ['技能自动发现', 'auto-discover'],
+};
+const GUARD_LABELS = {
+  write_text_file: '写入文件', insert_text_file: '插入文件', run_shell: '执行命令', download_file: '下载文件',
+};
+
+function renderFeatures() {
+  const flags = (settingsFeatures && settingsFeatures.flags) || {};
+  const guard = (settingsFeatures && settingsFeatures.guard_tools) || [];
+  const fl = document.getElementById('featureList');
+  fl.innerHTML = '';
+  Object.keys(flags).forEach(k => {
+    const meta = FEATURE_LABELS[k] || [k, ''];
+    const on = flags[k] === true;
+    const div = document.createElement('div');
+    div.className = 'feature-check' + (on ? ' checked' : '');
+    div.innerHTML = '<input type="checkbox" data-key="' + k + '" ' + (on ? 'checked' : '') + '>' +
+      '<div><div class="fc-name">' + escapeHtml(meta[0]) + '</div>' +
+      (meta[1] ? '<div class="fc-desc">' + escapeHtml(meta[1]) + '</div>' : '') + '</div>';
+    div.querySelector('input').onchange = function() { settingsFeatures.flags[k] = this.checked; };
+    fl.appendChild(div);
+  });
+  const gl = document.getElementById('guardList');
+  gl.innerHTML = '';
+  const allTools = ['write_text_file', 'insert_text_file', 'run_shell', 'download_file', 'view_text_file', 'web_search'];
+  allTools.forEach(k => {
+    const on = guard.includes(k);
+    const div = document.createElement('div');
+    div.className = 'feature-check' + (on ? ' checked' : '');
+    div.innerHTML = '<input type="checkbox" data-g="' + k + '" ' + (on ? 'checked' : '') + '>' +
+      '<div><div class="fc-name">' + escapeHtml(GUARD_LABELS[k] || k) + '</div></div>';
+    div.querySelector('input').onchange = function() {
+      // 管理 guard 集合
+      const list = settingsFeatures.guard_tools;
+      const i = list.indexOf(k);
+      if (this.checked && i < 0) list.push(k);
+      if (!this.checked && i >= 0) list.splice(i, 1);
+    };
+    gl.appendChild(div);
+  });
+}
+
+async function saveFeatures() {
+  if (!settingsFeatures) return;
+  const payload = { flags: settingsFeatures.flags, guard_tools: settingsFeatures.guard_tools };
+  try {
+    const resp = await fetch('/api/flags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    const r = await resp.json();
+    if (r.status !== 'success') showToast('保存失败：' + (r.message || '未知错误'), 'error');
+    else showToast('✅ 功能开关已保存，下一轮消息生效', 'success');
+  } catch (e) { showToast('保存失败：' + e.message, 'error'); }
+}
+
+// ---------- 日志 ----------
+async function loadLogs() {
+  const listEl = document.getElementById('logsList');
+  listEl.innerHTML = '<div class="modal-loading">加载中…</div>';
+  try {
+    const resp = await fetch('/api/logs');
+    const data = await resp.json();
+    const logs = data.logs || [];
+    if (!logs.length) { listEl.innerHTML = '<div class="setting-hint">暂无日志</div>'; return; }
+    listEl.innerHTML = logs.map(l =>
+      '<div class="log-item" onclick="viewLog(\'' + l.name + '\')">' +
+        '<span class="li-name">' + escapeHtml(l.name) + '</span>' +
+        '<span class="li-meta">' + l.files.length + ' 文件 · ' + escapeHtml(l.mtime) + '</span>' +
+        '<span class="li-del" onclick="event.stopPropagation();deleteLog(\'' + l.name + '\')" title="删除整个会话">×</span>' +
+      '</div>'
+    ).join('');
+  } catch (e) { listEl.innerHTML = '<div class="setting-hint">加载日志失败：' + escapeHtml(e.message) + '</div>'; }
+}
+
+async function viewLog(name) {
+  // 优先显示 round_001.md
+  try {
+    const listResp = await fetch('/api/logs');
+    const data = await listResp.json();
+    const lg = (data.logs || []).find(x => x.name === name);
+    let file = 'round_001.md';
+    if (lg && !lg.files.some(f => f.name === 'round_001.md')) file = lg.files[0] ? lg.files[0].name : '';
+    if (!file) { showToast('无文件可查看', 'error'); return; }
+    const resp = await fetch('/api/log?session=' + encodeURIComponent(name) + '&file=' + encodeURIComponent(file));
+    const r = await resp.json();
+    if (r.status !== 'success') { showToast(r.message || '读取失败', 'error'); return; }
+    const viewer = document.createElement('div');
+    viewer.className = 'log-viewer';
+    viewer.innerHTML = '<div class="lv-head"><span>' + escapeHtml(name) + ' · ' + escapeHtml(r.name) + '</span>' +
+      '<button class="btn sm" onclick="this.parentElement.parentElement.remove()">关闭</button></div>' +
+      '<pre>' + escapeHtml(r.content) + '</pre>';
+    // 追加到列表下方
+    const listEl = document.getElementById('logsList');
+    listEl.querySelectorAll('.log-viewer').forEach(v => v.remove());
+    listEl.appendChild(viewer);
+  } catch (e) { showToast('查看失败：' + e.message, 'error'); }
+}
+
+async function deleteLog(name) {
+  if (!window.confirm('删除整个会话日志「' + name + '」？（不可恢复）')) return;
+  try {
+    const resp = await fetch('/api/logs/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: name }) });
+    const r = await resp.json();
+    if (r.status === 'success') { showToast('已删除 ' + name, 'success'); loadLogs(); }
+    else showToast(r.message || '删除失败', 'error');
+  } catch (e) { showToast('删除失败：' + e.message, 'error'); }
+}
+
+// ---------- 偏好 ----------
+const PREFS_KEY = 'prism_harness_prefs';
+function getPrefs() {
+  try { return JSON.parse(localStorage.getItem(PREFS_KEY)) || {}; } catch (e) { return {}; }
+}
+function renderPrefs() {
+  const p = getPrefs();
+  const fs = document.getElementById('pref_fontsize'); if (fs) fs.value = p.fontsize || '14';
+  const ls = document.getElementById('pref_livestatus'); if (ls) ls.checked = p.livestatus !== false;
+}
+function applyPrefs() {
+  const p = getPrefs();
+  document.documentElement.style.setProperty('--chat-font-size', (p.fontsize || '14') + 'px');
+  const bubbles = document.querySelectorAll('.msg .bubble');
+  bubbles.forEach(b => b.style.fontSize = p.fontsize + 'px');
+}
+function savePrefs() {
+  const p = getPrefs();
+  p.fontsize = document.getElementById('pref_fontsize').value;
+  p.livestatus = document.getElementById('pref_livestatus').checked;
+  document.getElementById('liveStatus').style.display = p.livestatus ? '' : 'none';
+  localStorage.setItem(PREFS_KEY, JSON.stringify(p));
+  applyPrefs();
+  showToast('✅ 偏好已保存', 'success');
+}
+function loadPrefs() {
+  renderPrefs();
+  applyPrefs();
+  document.getElementById('liveStatus').style.display = getPrefs().livestatus === false ? 'none' : '';
+}
+// 监听偏好字号变化
+(function() {
+  const sheet = document.createElement('style');
+  sheet.textContent = '.msg .bubble{font-size:var(--chat-font-size,14px)}';
+  document.head.appendChild(sheet);
+})();
+
+// ---------- 侧边栏模型名 ----------
+function updateSidebarModel(val) {
+  if (!val && settingsState) {
+    const p = settingsState.providers[settingsState.llm.provider];
+    val = p ? (p.model || settingsState.llm.provider) : settingsState.llm.provider;
+  }
+  const sections = document.querySelectorAll('.panel-sidebar .sidebar-section');
+  sections.forEach(s => {
+    const label = s.querySelector('.sidebar-label');
+    if (label && /MODEL/i.test(label.textContent)) {
+      const v = s.querySelector('.sidebar-value');
+      if (v && val) v.textContent = val;
+    }
+  });
+}
+
+(async function refreshModelOnLoad() {
+  renderPrefs();
+  try {
+    const resp = await fetch('/api/config');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    const p = (data.providers || {})[(data.llm || {}).provider];
+    updateSidebarModel(p ? (p.model || data.llm.provider) : data.llm.provider);
+  } catch (e) { /* 忽略 */ }
+})();
 // Focus input on load
 switchView('chat');
 switchDetailPane('context');
