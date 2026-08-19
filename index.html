@@ -452,6 +452,10 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .add-provider-row .field{flex:1}
 .si-del.armed{color:var(--danger);font-weight:700}
 .li-del.armed{color:var(--danger);font-weight:700}
+.si-recover{display:inline-block;margin:4px 0 2px;padding:2px 8px;font-size:11px;line-height:1.5;color:var(--success,#3fb950);border:1px solid var(--success,#3fb950);border-radius:4px;cursor:pointer;background:transparent}
+.si-recover:hover{background:var(--success,#3fb950);color:#fff}
+.si-empty{font-size:11px;color:var(--text-tertiary);margin-top:2px}
+.session-item .si-meta{display:flex;align-items:center;gap:6px;margin-top:2px}
 </style>
 </head>
 <body>
@@ -1653,9 +1657,64 @@ function renderSessionList() {
     return `<div class="session-item${activeCls}" data-sid="${s.id}" onclick="switchSession('${s.id}')">
       <div class="si-title" title="${title}">${title || '新会话'}</div>
       <div class="si-time">${hh}:${mm}</div>
+      ${(!s.chatHTML && recoverableIds.has(s.id))
+        ? `<div class="si-meta"><button class="si-recover" onclick="event.stopPropagation();recoverSession('${s.id}')">↺ 从日志恢复</button></div>`
+        : ''}
       <span class="si-del" onclick="event.stopPropagation();deleteSessionClick(this,'${s.id}')" title="删除会话">×</span>
     </div>`;
   }).join('');
+}
+
+// ====== 从 session_logs 恢复丢失内容的会话（旧会话点进去是空白的修复） ======
+let recoverableIds = new Set();
+async function refreshRecoverable() {
+  try {
+    const resp = await fetch('/api/logs');
+    const data = await resp.json();
+    recoverableIds = new Set((data.logs || []).map(l => l.name));
+    renderSessionList();
+  } catch (e) { /* 拉取失败则保持空集合 */ }
+}
+async function recoverSession(id) {
+  let data;
+  try {
+    const resp = await fetch('/api/session/transcript?session=' + encodeURIComponent(id));
+    data = await resp.json();
+  } catch (e) { showToast('恢复失败：' + e.message, 'error'); return; }
+  if (data.status !== 'success' || !data.rounds || !data.rounds.length) {
+    showToast(data.message || '该会话没有可恢复的日志', 'error');
+    return;
+  }
+  // 切到该会话并重绘对话
+  switchSession(id);
+  for (const r0 of data.rounds) {
+    if (r0.user) addUserMessage(r0.user);
+    if (r0.assistant) addAssistantMessage(r0.assistant);
+  }
+  const msgs = [];
+  for (const r0 of data.rounds) {
+    if (r0.user) msgs.push({ role: 'user', content: r0.user, contents: [] });
+    if (r0.assistant) msgs.push({ role: 'assistant', content: r0.assistant, contents: [] });
+  }
+  messages = msgs; toolCalls = [];
+  const prev = findSession(id) || { id, createdAt: Date.now() };
+  const rec = Object.assign(prev, {
+    title: data.title || prev.title || '恢复的会话',
+    lastActive: Date.now(),
+    chatHTML: chatMessages.innerHTML,
+    viewMode: traceViewMode,
+    traceSummary: (document.getElementById('traceSummary') || {}).textContent || '',
+    traceLog: (document.getElementById('traceLog') || {}).innerHTML || '',
+    contextHTML: (document.getElementById('contextData') || {}).innerHTML || '',
+    contextEmptyShown: (document.getElementById('contextEmpty') || {}).style.display !== 'none',
+    toolsHTML: (document.getElementById('toolsContent') || {}).innerHTML || '',
+    pane: switchDetailPane._cur || 'context',
+    runtime: { messages: msgs, toolCalls: [] },
+  });
+  upsertSession(rec);
+  renderSessionList();
+  scrollChat();
+  showToast('已从日志恢复会话「' + (data.title || id) + '」', 'success');
 }
 
 // 清空当前界面 DOM + 运行时状态，准备切到另一个会话
@@ -2373,6 +2432,8 @@ userInput.focus();
   }
   setActiveSessionId(SESSION_ID);
   renderSessionList();
+  // 预取"有日志可恢复"的会话 id 集合，供左侧列表为空会话显示"从日志恢复"按钮
+  refreshRecoverable();
 
   // 刷新后恢复当前活动会话的快照到界面（否则刷完聊天/轨迹是空的）
   const activeRec = findSession(SESSION_ID);

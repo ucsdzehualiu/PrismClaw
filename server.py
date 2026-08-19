@@ -384,6 +384,49 @@ async def read_log(session: str, file: str = ""):
         return {"status": "success", "name": file, "content": f.read()}
 
 
+@app.get("/api/session/transcript")
+async def session_transcript(session: str):
+    """从 session_logs 的 snapshots 重建某会话的对话记录，供前端恢复空/丢失的会话。"""
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", session):
+        return {"status": "error", "message": "非法 session 名"}
+    p = os.path.join(LOG_DIR, session)
+    if not os.path.isdir(p):
+        return {"status": "error", "message": "会话不存在"}
+    snap_dir = os.path.join(p, "snapshots")
+    rounds = []
+    if os.path.isdir(snap_dir):
+        for fn in sorted(os.listdir(snap_dir)):
+            if not fn.startswith("round_") or not fn.endswith(".json"):
+                continue
+            try:
+                with open(os.path.join(snap_dir, fn), "r", encoding="utf-8") as f:
+                    d = json.load(f)
+            except Exception:
+                continue
+            user_text = ""
+            asst_text = ""
+            for m in (d.get("messages") or []):
+                role = m.get("role")
+                txt = str(m.get("preview") or m.get("content") or m.get("text") or "").strip()
+                if not txt:
+                    continue
+                if role == "user" and not user_text:
+                    user_text = txt
+                elif role == "assistant" and not asst_text:
+                    asst_text = txt
+            if not user_text:
+                user_text = str(d.get("user_input") or "").strip()
+            mm = re.search(r"(\d+)", fn)
+            rn = int(mm.group(1)) if mm else (d.get("round") or 0)
+            if user_text or asst_text:
+                rounds.append({"round": rn, "user": user_text, "assistant": asst_text})
+    if not rounds:
+        return {"status": "error", "message": "该会话没有可恢复的对话记录"}
+    rounds.sort(key=lambda r: r["round"])
+    title = (rounds[0].get("user") or "恢复的会话")[:20]
+    return {"status": "success", "session": session, "title": title, "rounds": rounds}
+
+
 @app.post("/api/logs/delete")
 async def delete_log(request: Request):
     import shutil
