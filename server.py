@@ -25,6 +25,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 import conf
+from conf import console
 from prism_harness_agent import get_or_create_agent, SESS_MGR
 from model_config import load_config
 from tools import load_persona_file
@@ -464,16 +465,38 @@ async def delete_log(request: Request):
     session = body.get("session", "")
     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", session):
         return {"status": "error", "message": "非法 session 名"}
+    # 同时清理内存会话，避免 agent 任务/内存残留
+    await SESS_MGR.delete_session(session)
     p = os.path.join(LOG_DIR, session)
-    if not os.path.isdir(p):
-        return {"status": "error", "message": "会话不存在"}
-    shutil.rmtree(p, ignore_errors=True)
+    if os.path.isdir(p):
+        shutil.rmtree(p, ignore_errors=True)
+    console("[delete-log]", session)
+    return {"status": "success"}
+
+
+@app.post("/api/session/delete")
+async def delete_session(request: Request):
+    """删除会话：内存会话 + session_logs 日志目录。"""
+    import shutil
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session = body.get("session", "")
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", session):
+        return {"status": "error", "message": "非法 session 名"}
+    await SESS_MGR.delete_session(session)
+    p = os.path.join(LOG_DIR, session)
+    if os.path.isdir(p):
+        shutil.rmtree(p, ignore_errors=True)
+    console("[delete-session]", session)
     return {"status": "success"}
 
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
     session_id = validate_session_id(request.session_id)
+    console("[chat]", session_id)
     queue_ok = False
     for _ in range(3):
         sess = await get_or_create_agent(session_id, workspace_dir=WORKSPACE_DIR)
@@ -508,39 +531,41 @@ async def stop(session_id: str, request_id: str):
     sess = await SESS_MGR.get_or_create_session(session_id, create=False)
     if sess is None:
         return {"status": "not_found"}
+    console("[stop]", session_id, request_id)
     await sess.cancel_request(request_id)
     return {"status": "canceled"}
 
 
 @app.post("/resolve")
 async def resolve(request: Request):
-    """HITL 工具确认：resolve 当前 pending 的 Future，不开新 SSE 流。
+    """HITL 工具确认：resolve 当前 pending 的状态（不开新 SSE 流）。
 
-    agent 后续输出继续从触发确认的那个原请求的 SSE 流出来。
+    只改 pending.status、不 pop；下一轮 guard._reasoning 读到 APPROVED/REJECTED
+    后继续执行/拒绝。agent 后续输出继续从触发确认的那个原请求的 SSE 流出来。
     """
     body = await request.json()
     session_id = validate_session_id(body.get("session_id", ""))
     sess = await SESS_MGR.get_or_create_session(session_id, create=False)
     if sess is None:
         return {"status": "not_found"}
-    # /approve_all：开启自动放行，并放行当前堵着的
+    console("[resolve]", session_id)
+    # /approve_all：开启自动放行，并放行当前堵着的全部 pending
     if body.get("auto_approve"):
         sess.auto_approve = True
-        pending = await sess.resolve_pending(True)
-        return {"status": "resolved", "had_pending": pending is not None}
+        n = await sess.approve_all_pending()
+        return {"status": "resolved", "had_pending": n > 0}
     # /approve_all off：关闭自动放行
     if body.get("auto_approve_off"):
         sess.auto_approve = False
         return {"status": "ok"}
     # /approve 或 /reject
     approved = bool(body.get("approved", False))
-    pending = await sess.resolve_pending(approved)
-    return {"status": "resolved", "had_pending": pending is not None}
+    had = await sess.resolve_pending(approved)
+    return {"status": "resolved", "had_pending": had}
 
 
 if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host=server_cfg.get("host", "127.0.0.1"),
-        port=server_cfg.get("port", 8765),
-    )
+    host = server_cfg.get("host", "127.0.0.1")
+    port = server_cfg.get("port", 8765)
+    console("[start]", f"http://{host}:{port}")
+    uvicorn.run(app, host=host, port=port)

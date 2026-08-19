@@ -8,41 +8,13 @@
 - approve/reject 只改 pending.status，下一轮 _reasoning 自然读到
 """
 
-import time
-from typing import Any, Optional
+import json
+from typing import Optional
 
 from agentscope.message import Msg, ToolUseBlock, ToolResultBlock, TextBlock
 
 from conf import GUARD_TOOLS, GUARD_TIMEOUT
-
-
-class PendingStatus:
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-
-
-class PendingToolUse:
-    def __init__(self, tool_use: dict):
-        self.tool_use = tool_use
-        self.status = PendingStatus.PENDING
-        self.created_at = time.time()
-
-    @property
-    def name(self) -> str:
-        return self.tool_use.get("name", "unknown")
-
-    @property
-    def input(self) -> Any:
-        return self.tool_use.get("input", {})
-
-    def is_expired(self, timeout: float) -> bool:
-        """等待超过 timeout 秒仍未确认 → 视为超时（仅在 status==PENDING 时判断）。"""
-        return time.time() - self.created_at > timeout
-
-    def resolve(self, approved: bool) -> None:
-        """供 session.resolve_pending() 调用，设置状态以唤醒轮询。"""
-        self.status = PendingStatus.APPROVED if approved else PendingStatus.REJECTED
+from session import PendingStatus, PendingToolUse
 
 
 TOOL_REJECTED_TEMPLATE = """
@@ -79,6 +51,28 @@ class PrismHarnessGuardMixin:
             tool_input = pending.input
 
             if pending.status == PendingStatus.PENDING:
+                if tool_name == "ask_user_question":
+                    # 结构化提问：渲染成文本卡片，前端据此弹选择卡片
+                    qs = tool_input.get("questions", []) if isinstance(tool_input, dict) else []
+                    lines = ["❓ **需要你的选择**", ""]
+                    for q in qs:
+                        if not isinstance(q, dict):
+                            continue
+                        header = q.get("header") or "问题"
+                        question = q.get("question") or ""
+                        lines.append(f"**{header}**：{question}")
+                        for opt in (q.get("options") or []):
+                            if isinstance(opt, dict) and opt.get("label"):
+                                lines.append(f"- {opt['label']}")
+                        lines.append("")
+                    content = "\n".join(lines) if len(lines) > 2 else "❓ 请选择："
+                    msg = Msg(
+                        role="assistant",
+                        content=[TextBlock(type="text", text=content)],
+                        name="prism_harness_guard",
+                    )
+                    await self.print(msg, last=True)
+                    return msg
                 # 发确认卡片，return msg（不调 super()._reasoning）
                 content = (
                     f"🔒 **工具调用需要确认**\n\n"
@@ -93,11 +87,27 @@ class PrismHarnessGuardMixin:
                     content=[TextBlock(type="text", text=content)],
                     name="prism_harness_guard",
                 )
-                await self.memory.add(msg)
+                # 确认卡片只推给前端展示，不写进 memory——否则模型会在后续上下文里
+                # 看到自己"请求确认"的假 assistant 消息，污染推理。
                 await self.print(msg, last=True)
                 return msg
 
             elif pending.status == PendingStatus.APPROVED:
+                if tool_name == "ask_user_question" and pending.answer is not None:
+                    # 用户已回答：把回答作为该工具的真实 tool_result 注入 memory，继续推理（不重放工具）
+                    await self.memory.delete_by_mark(
+                        _fake_result_mark(pending.tool_use["id"]),
+                    )
+                    answer_text = json.dumps({"answers": pending.answer}, ensure_ascii=False)
+                    res_msg = Msg(
+                        "system",
+                        [ToolResultBlock(type="tool_result", id=pending.tool_use["id"], name="ask_user_question", output=answer_text)],
+                        "system",
+                    )
+                    await self.memory.add(res_msg)
+                    await self.print(res_msg, last=True)
+                    await self._prism_harness_sess.pop_pending_tool()
+                    return await super()._reasoning(tool_choice)
                 # 移除该工具对应的假 tool_result，然后复用原始 tool_use id。
                 # 原始 tool_use 已经在 memory 里，不需要再 add，否则会重复一条。
                 tool_use_block = pending.tool_use

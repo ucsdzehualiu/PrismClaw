@@ -170,6 +170,15 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是本项目配置的一位智能 AI 助手（
 - **安装前先检查**（重要）：执行任何安装/下载命令前，先检查目标是否已存在（如 `node_modules/` 目录、`pip show`、`npm ls` 等）。已存在且可用的直接告诉用户，不要重复安装。
 - **非交互模式**：所有 install/uninstall 命令必须带确认标志，否则会卡住等待输入。`pip install/uninstall` 加 `-y`，`conda install/uninstall` 加 `-y`，`npm install/uninstall` 一般不需要额外标志。
 
+### 🤖 子代理（subagent）
+
+- 复杂任务可调用 `subagent(prompt, skill=...)` 创建独立子代理去完成，你（主代理）只负责编排、验收与用户交互。
+- 子代理拥有独立上下文，能读写文件、跑脚本；适合「研究、规划、写文件、生成页面」这类可独立完成的子任务。
+- 一个子代理只做**一个原子子任务**；需要并行时在同一条消息里一次发多个 subagent 调用。
+- 子代理返回最终文字结果后，你据此继续推进。不要让子代理去反问用户——需要用户输入由你亲自处理。
+- 技能文档里提到的「Agent tool」指的就是本工具 `subagent`。
+- 需要向用户收集结构化信息（页数/受众/目的/风格等）时，调用 `ask_user_question` 工具弹选择卡片，不要用纯文本反复追问。
+
 ## 人格设定
 
 ### 你的名字（最高优先级，必须始终遵守）
@@ -695,6 +704,139 @@ async def download_file(
 # 正确流程：web_fetch 拿到安装文档 → 照着文档用 run_shell 真正执行安装命令。
 
 
+# ---- 子代理（subagent）：委派独立子任务 ----
+
+
+def _resolve_skill_md(workspace_dir: str, skill: str):
+    """把 skill 参数解析为 SKILL.md 的绝对路径；找不到返回 None。"""
+    skill = (skill or "").strip().strip("\"'")
+    if not skill:
+        return None
+    skills_root = os.path.join(workspace_dir, "skills")
+
+    def _norm(p):
+        return p if p.endswith("SKILL.md") else os.path.join(p, "SKILL.md")
+
+    for c in (
+        skill,
+        os.path.join(workspace_dir, skill),
+        os.path.join(skills_root, skill),
+        _norm(skill),
+        _norm(os.path.join(workspace_dir, skill)),
+        _norm(os.path.join(skills_root, skill)),
+    ):
+        if os.path.isfile(c):
+            return c
+
+    # 按目录名递归查找（处理 nested skill，如 pptx-craft/designer）
+    name = os.path.basename(skill.rstrip("/\\"))
+    if name:
+        for root_dir, dirs, _ in os.walk(skills_root):
+            if name in dirs:
+                md = os.path.join(root_dir, name, "SKILL.md")
+                if os.path.isfile(md):
+                    return md
+    return None
+
+
+async def ask_user_question(questions: list) -> ToolResponse:
+    """向用户提问并等待用户选择（用于收集主题、页数、受众、目的、风格等需求）。
+
+    该工具会暂停并弹出选择题卡片，用户选择后以结构化结果返回。
+    questions 是一个问题列表，每项形如：
+    {"id": "pages", "question": "需要多少页？", "header": "页数",
+     "options": [{"label": "3-6 页", "description": "简短汇报"}, ...],
+     "multi_select": false}
+
+    返回形如：{"answers": [{"id": "pages", "selected": ["3-6 页"]}, ...]}
+    一次尽量把需要收集的信息都放在同一个 questions 列表里，减少来回。
+    """
+    # 实际由 HITL guard 拦截处理；正常流程不会执行到此处。
+    return ToolResponse(content=[TextBlock(type="text", text="(等待用户回答——由系统弹卡片处理)")])
+
+
+async def run_subagent(
+    prompt: str,
+    skill: str = "",
+    workspace_dir: str = "workspace",
+    max_iters: int = 30,
+    timeout: int = 600,
+) -> ToolResponse:
+    """创建一个全新的子代理，独立完成一个自包含子任务，并返回它的最终文字输出。
+
+    子代理拥有独立上下文和与主代理相同的工具集（文件读写/Shell/搜索/下载等），
+    适合把「研究、规划、写文件、跑脚本」这类可独立完成的子任务委派出去。
+    例如：让一个子代理读大纲产出 outline.md，另一个子代理生成某一页 HTML。
+
+    Args:
+        prompt: 给子代理的完整任务描述，必须自包含（含所有它需要的路径/素材/约束）。
+        skill: 可选。要作为子代理系统提示加载的技能（SKILL.md 路径或技能目录名），留空用通用提示。
+        max_iters: 子代理 ReAct 最大迭代数（默认 30）。
+        timeout: 子代理整体超时秒数（默认 600）。
+    """
+    from agentscope.agent import ReActAgent
+    from agentscope.formatter import OpenAIChatFormatter
+    from agentscope.memory import InMemoryMemory
+    from agentscope.message import Msg
+    from model_config import build_model, load_config
+
+    prompt = (prompt or "").strip()
+    if not prompt:
+        return ToolResponse(content=[TextBlock(type="text", text="错误：subagent 的 prompt 不能为空。")])
+
+    sys_prompt = (
+        "你是主代理派出的子代理，独立完成一个自包含子任务。\n"
+        "- 只做被要求的事，完成后用一两句话总结结果。\n"
+        "- 不要反问用户、不要征询确认，直接执行。\n"
+        "- 拿到结果就停，不要重复调用工具。\n"
+    )
+    skill_md = _resolve_skill_md(workspace_dir, skill)
+    if skill_md:
+        try:
+            with open(skill_md, "r", encoding="utf-8") as f:
+                sys_prompt = f.read()
+        except Exception:
+            pass
+    # 替换 skill 里的 {skill_root} 占位符
+    skills_root = os.path.join(workspace_dir, "skills").replace("\\", "/")
+    sys_prompt = sys_prompt.replace("{skill_root}", skills_root)
+
+    try:
+        cfg = load_config()
+        model = build_model(cfg, stream=False)
+        toolkit = await build_toolkit(workspace_dir)
+    except Exception as e:
+        return ToolResponse(content=[TextBlock(type="text", text=f"子代理初始化失败：{e}")])
+
+    sub = ReActAgent(
+        name="subagent",
+        sys_prompt=sys_prompt,
+        model=model,
+        formatter=OpenAIChatFormatter(),
+        toolkit=toolkit,
+        memory=InMemoryMemory(),
+        max_iters=int(max_iters or 30),
+        parallel_tool_calls=bool(cfg.get("agent", {}).get("parallel_tool_calls", False)),
+    )
+    sub.set_console_output_enabled(False)
+
+    try:
+        reply = await asyncio.wait_for(
+            sub(Msg("user", prompt, "user")),
+            timeout=float(timeout),
+        )
+        text = reply.get_text_content()
+        if not text:
+            text = "(子代理已完成，但没有文本输出。)"
+        return ToolResponse(content=[TextBlock(type="text", text=text)])
+    except asyncio.TimeoutError:
+        return ToolResponse(content=[TextBlock(type="text", text=f"子代理超时（>{timeout}s），已强制终止。")])
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        return ToolResponse(content=[TextBlock(type="text", text=f"子代理执行出错：{e}")])
+
+
 # ---- 技能注册 ----
 
 async def build_toolkit(workspace_dir: str = "workspace") -> Toolkit:
@@ -748,10 +890,20 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
     if FLAGS.get("enable_skills", True):
         toolkit.register_tool_function(functools.partial(manage_skill, workspace_dir=workspace_dir))
 
+    # 结构化提问（走 HITL 弹卡片，收集页数/受众/风格等）
+    toolkit.register_tool_function(ask_user_question)
+
     # 下载 + 从 URL 安装技能（受控文件访问，走 HITL 确认）
     if FLAGS.get("enable_download", True):
         toolkit.register_tool_function(
             functools.partial(download_file, workspace_dir=workspace_dir),
+        )
+
+    # 子代理：委派独立子任务（如 PPT pipeline 的 Eve/Alice/Charlie）
+    if FLAGS.get("enable_subagent", False):
+        toolkit.register_tool_function(
+            functools.partial(run_subagent, workspace_dir=workspace_dir),
+            func_name="subagent",
         )
 
     return toolkit

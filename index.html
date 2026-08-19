@@ -214,6 +214,10 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .confirm-card .confirm-actions{display:flex;gap:8px;padding:4px 12px 12px}
 .confirm-card .confirm-actions .btn{font-size:12px;padding:5px 10px}
 .confirm-card .confirm-actions .btn.approve{background:var(--success);border-color:var(--success);color:#fff}
+.question-card .q-block{margin:6px 0}
+.question-card .q-title{font-weight:600;margin-bottom:3px;color:var(--text-primary)}
+.question-card .q-opt{display:flex;align-items:center;gap:6px;padding:2px 0;font-size:12.5px;cursor:pointer;color:var(--text-primary)}
+.question-card .q-opt input{margin:0;accent-color:var(--accent,#4a9eff)}
 
 /* ---- Right detail rail ---- */
 .panel-details{min-width:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg-layer-1);
@@ -457,7 +461,7 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .btn.armed{background:var(--danger);border-color:var(--danger);color:#fff;font-weight:600}
 .add-provider-row{display:flex;align-items:center;gap:8px;margin:4px 0 10px}
 .add-provider-row .field{flex:1}
-.si-del.armed{color:var(--danger);font-weight:700}
+.si-del.armed{color:#fff;background:var(--danger);font-weight:600;opacity:1;padding:4px 9px;border-radius:6px;font-size:12px;min-width:0}
 .li-del.armed{color:var(--danger);font-weight:700}
 .si-recover{display:inline-block;margin:4px 0 2px;padding:2px 8px;font-size:11px;line-height:1.5;color:var(--success,#3fb950);border:1px solid var(--success,#3fb950);border-radius:4px;cursor:pointer;background:transparent}
 .si-recover:hover{background:var(--success,#3fb950);color:#fff}
@@ -964,6 +968,10 @@ async function sendMessage() {
             if (st.phase === 'confirm') {
               renderConfirmCard(asstId, st.detail || '');
             }
+            // 结构化提问 → 渲染选择卡片
+            if (st.phase === 'question') {
+              renderQuestionCard(asstId, st.questions || []);
+            }
             continue;
           }
 
@@ -1171,6 +1179,57 @@ function renderConfirmCard(asstId, detail) {
   scrollChat();
 }
 
+// 结构化提问卡片（ask_user_question）：渲染问题 + 选项 + 提交按钮
+let currentQuestions = [];
+function renderQuestionCard(asstId, questions) {
+  const div = document.getElementById(asstId);
+  if (!div) return;
+  div.querySelectorAll('.confirm-card').forEach(c => c.remove());
+  currentQuestions = Array.isArray(questions) ? questions : [];
+  const card = document.createElement('div');
+  card.className = 'tool-card confirm-card question-card';
+  let html = '<div class="tool-header"><span class="arrow">▶</span> ❓ 请选择</div>';
+  currentQuestions.forEach((q, qi) => {
+    if (!q || typeof q !== 'object') return;
+    html += '<div class="q-block">' +
+      '<div class="q-title">' + escapeHtml(q.header || '问题') + '：' + escapeHtml(q.question || '') + '</div>';
+    const opts = Array.isArray(q.options) ? q.options : [];
+    opts.forEach((opt, oi) => {
+      const label = (opt && opt.label) ? String(opt.label) : '';
+      const type = q.multi_select ? 'checkbox' : 'radio';
+      html += '<label class="q-opt"><input type="' + type + '" name="q-' + qi + '" value="' + escapeHtml(label) + '"> ' + escapeHtml(label) + '</label>';
+    });
+    if (!opts.length) {
+      html += '<input type="text" class="q-free" data-qi="' + qi + '" placeholder="请输入" style="width:100%;margin-top:3px">';
+    }
+    html += '</div>';
+  });
+  html += '<div class="confirm-actions"><button class="btn accent" onclick="submitAnswers()">✓ 提交</button></div>';
+  card.innerHTML = html;
+  const toolCards = div.querySelectorAll('.tool-card:not(.confirm-card)');
+  if (toolCards.length > 0) {
+    const anchor = toolCards[toolCards.length - 1];
+    if (anchor.nextSibling) div.insertBefore(card, anchor.nextSibling);
+    else div.appendChild(card);
+  } else {
+    div.appendChild(card);
+  }
+  scrollChat();
+}
+
+function submitAnswers() {
+  const answers = [];
+  (currentQuestions || []).forEach((q, qi) => {
+    if (!q || typeof q !== 'object') return;
+    const selected = [];
+    document.querySelectorAll('input[name="q-' + qi + '"]:checked').forEach(inp => selected.push(inp.value));
+    const free = document.querySelector('.q-free[data-qi="' + qi + '"]');
+    if (!selected.length && free && free.value.trim()) selected.push(free.value.trim());
+    answers.push({ id: q.id || ('q' + qi), selected: selected });
+  });
+  sendMagic('/answer ' + JSON.stringify(answers));
+}
+
 // 兜底：assistant 文本里出现确认表述时也渲染（旧路径，模型若绕过 guard 自写文本）
 function maybeRenderConfirm(asstId, content) {
   const div = document.getElementById(asstId);
@@ -1247,6 +1306,9 @@ async function sendMagic(cmd) {
             handleLiveStatus(st);
             if (st.phase === 'confirm') {
               renderConfirmCard(lastAsstId, st.detail || '');
+            }
+            if (st.phase === 'question') {
+              renderQuestionCard(lastAsstId, st.questions || []);
             }
             continue;
           }
@@ -1553,7 +1615,15 @@ const MAX_SESSION_SNAP = 600000;   // 单会话快照上限字节，防 localSto
 
 function loadSessions() {
   try {
-    return JSON.parse(localStorage.getItem(SESSION_LIST_KEY)) || [];
+    const raw = JSON.parse(localStorage.getItem(SESSION_LIST_KEY)) || [];
+    if (!Array.isArray(raw)) return [];
+    // 去重 + 过滤空 id：清理历史 bug 留下的幽灵/重复会话
+    const seen = new Set();
+    const out = [];
+    for (const s of raw) {
+      if (s && s.id && !seen.has(s.id)) { seen.add(s.id); out.push(s); }
+    }
+    return out;
   } catch (e) { return []; }
 }
 function saveSessions(list) {
@@ -1604,6 +1674,7 @@ function capturePanelStates() {
 }
 
 function saveCurrentSessionState() {
+  if (!SESSION_ID) return;  // 无有效会话 id 时绝不保存，避免产生幽灵会话/重复会话
   const prev = findSession(SESSION_ID);
   const rec = prev || { id: SESSION_ID, title: '新会话', createdAt: Date.now(), lastActive: Date.now() };
   const panels = capturePanelStates();
@@ -1695,8 +1766,14 @@ async function recoverSession(id) {
     showToast(data.message || '该会话没有可恢复的日志', 'error');
     return;
   }
-  // 切到该会话并重绘对话
-  switchSession(id);
+  // 切到该会话并重绘对话。
+  // 若恢复的就是当前会话，switchSession 会直接 return（不清空），
+  // 这里显式清空，避免把恢复内容叠加到旧内容上。
+  if (id !== SESSION_ID) {
+    switchSession(id);
+  } else {
+    clearCurrentUI();
+  }
   for (const r0 of data.rounds) {
     if (r0.user) addUserMessage(r0.user);
     if (r0.assistant) addAssistantMessage(r0.assistant);
@@ -1820,8 +1897,19 @@ function deleteSession(ev, id) {
   let list = loadSessions();
   list = list.filter(s => s.id !== id);
   saveSessions(list);
-  if (id === activeSessionId() || id === SESSION_ID) {
-    // 删的是当前会话 → 若有剩余会话就切过去，否则新开会话
+  recoverableIds.delete(id);
+  // 后端同步删除：内存会话 + session_logs 日志（避免"删了日志/会话还在"）
+  fetch('/api/session/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session: id }),
+  }).catch(e => console.warn('[deleteSession]', e));
+  if (id === SESSION_ID || id === activeSessionId()) {
+    // 先清空界面并置空 SESSION_ID，避免 switchSession/newSession 里
+    // saveCurrentSessionState() 又把刚删除的会话存回去（"删不掉"的根因）
+    clearCurrentUI();
+    SESSION_ID = '';
+    sessionStorage.removeItem(SESSION_STORAGE_KEY);
     const next = list[list.length - 1];
     if (next) switchSession(next.id);
     else newSession();
@@ -1875,6 +1963,8 @@ function handleLiveStatus(st) {
     showLiveStatus(true, '🔒 待确认', 'pending');
   } else if (phase === 'confirm') {
     showLiveStatus(true, '🔒 待确认', 'pending');
+  } else if (phase === 'question') {
+    showLiveStatus(true, '❓ 待回答', 'pending');
   } else if (phase === 'heartbeat') {
     // 心跳：agent 还在工作，别让用户以为它死了
     showLiveStatus(true, '⏳ ' + detail, 'live');
@@ -2101,20 +2191,26 @@ function twoStepConfirm(btn, run, tip) {
   const key = btn.dataset.confirmKey || (btn.id || ('b' + Math.random().toString(36).slice(2, 8)));
   btn.dataset.confirmKey = key;
   const origText = btn.dataset.origText || btn.textContent;
+  const origTitle = (btn.dataset.origTitle !== undefined) ? btn.dataset.origTitle : (btn.title || '');
   if (_armed[key]) {
     clearTimeout(_armed[key].timer);
     btn.classList.remove('armed');
     btn.textContent = origText;
+    btn.title = origTitle;
     delete _armed[key];
     run();
     return;
   }
   btn.dataset.origText = origText;
+  btn.dataset.origTitle = origTitle;
   btn.classList.add('armed');
-  btn.textContent = '确认' + (tip ? '「' + tip + '」？' : '？');
+  // 短文案，避免把小「×」按钮撑成一长条；完整提示放到 title 悬浮
+  btn.textContent = '确认删除';
+  btn.title = tip ? ('再次点击确认：' + tip) : '再次点击确认';
   _armed[key] = { btn, timer: setTimeout(() => {
     btn.classList.remove('armed');
     btn.textContent = origText;
+    btn.title = origTitle;
     delete _armed[key];
   }, 3500) };
 }
@@ -2122,8 +2218,12 @@ function twoStepConfirm(btn, run, tip) {
 function resetArmed() {
   for (const k of Object.keys(_armed)) {
     const s = _armed[k];
-    if (s && s.btn) { s.btn.classList.remove('armed'); s.btn.textContent = s.btn.dataset.origText || s.btn.textContent; }
-    clearTimeout(s.timer);
+    if (s && s.btn) {
+      s.btn.classList.remove('armed');
+      s.btn.textContent = s.btn.dataset.origText || s.btn.textContent;
+      if (s.btn.dataset.origTitle !== undefined) s.btn.title = s.btn.dataset.origTitle;
+    }
+    if (s && s.timer) clearTimeout(s.timer);
     delete _armed[k];
   }
 }

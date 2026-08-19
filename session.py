@@ -20,20 +20,26 @@ class SessionStatus(str, Enum):
     INACTIVE = "INACTIVE"
 
 
-class PendingToolUse:
-    """一个待确认的工具调用，带 asyncio.Future 供 middleware await。
-
-    status 保留用于前端/调试查询；确认/拒绝通过 resolve() 完成 future。
-    """
+class PendingStatus(str, Enum):
+    """待确认工具的状态。"""
 
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
 
-    def __init__(self, tool_use: dict, future: "asyncio.Future[bool]"):
+
+class PendingToolUse:
+    """一个待确认的工具调用。
+
+    确认/拒绝只改 status，下一轮 PrismHarnessGuard._reasoning 轮询读取；
+    真正执行由 _acting 匹配到 APPROVED 后 pop 掉。这里不挂协程、不抛异常。
+    """
+
+    def __init__(self, tool_use: dict):
         self.tool_use = tool_use
-        self.future = future
-        self.status = self.PENDING
+        self.status = PendingStatus.PENDING
+        self.created_at = time.time()
+        self.answer = None  # ask_user_question 的用户回答（dict）
 
     @property
     def name(self) -> str:
@@ -43,11 +49,15 @@ class PendingToolUse:
     def input(self) -> Any:
         return self.tool_use.get("input", {})
 
+    def is_expired(self, timeout: float) -> bool:
+        """等待超过 timeout 秒仍未确认 → 视为超时（仅在 PENDING 时判断）。"""
+        return time.time() - self.created_at > timeout
+
     def resolve(self, approved: bool) -> None:
-        """完成 future，唤醒正在 await 的 middleware。"""
-        self.status = self.APPROVED if approved else self.REJECTED
-        if not self.future.done():
-            self.future.set_result(approved)
+        """设置状态以唤醒轮询（不 pop，pop 由 _acting 执行时完成）。"""
+        self.status = (
+            PendingStatus.APPROVED if approved else PendingStatus.REJECTED
+        )
 
 
 @dataclass
@@ -105,6 +115,34 @@ class Session:
         async with self.lock:
             return self.pending_tool_calls.pop(0) if self.pending_tool_calls else None
 
+    async def approve_head_pending(self) -> bool:
+        """把队首 pending 置为 APPROVED（供 /approve）。不 pop，等 _acting 执行时再 pop。"""
+        async with self.lock:
+            if not self.pending_tool_calls:
+                return False
+            self.pending_tool_calls[0].resolve(True)
+            return True
+
+    async def reject_head_pending(self) -> bool:
+        """把队首 pending 置为 REJECTED（供 /reject）。不 pop，等 _reasoning 处理。"""
+        async with self.lock:
+            if not self.pending_tool_calls:
+                return False
+            self.pending_tool_calls[0].resolve(False)
+            return True
+
+    async def answer_pending(self, answer) -> bool:
+        """给队首的 ask_user_question pending 写入用户回答并置为 APPROVED。"""
+        async with self.lock:
+            if not self.pending_tool_calls:
+                return False
+            p = self.pending_tool_calls[0]
+            if p.name != "ask_user_question":
+                return False
+            p.answer = answer
+            p.resolve(True)
+            return True
+
     async def approve_all_pending(self) -> int:
         """把所有待确认工具全部置为 APPROVED（供 /approve_all）。
 
@@ -115,20 +153,21 @@ class Session:
         async with self.lock:
             n = 0
             for p in self.pending_tool_calls:
-                p.status = PendingToolUse.APPROVED
+                p.resolve(True)
                 n += 1
             return n
 
-    async def resolve_pending(self, approved: bool) -> Optional[PendingToolUse]:
-        """取出头部 pending 并 resolve 其 future。供 /approve /reject 调用。
+    async def resolve_pending(self, approved: bool) -> bool:
+        """resolve 队首 pending（供 /resolve HTTP 端点）。
 
-        返回被 resolve 的 pending（若有），供调用方做后续提示。
+        与 /approve /reject 魔术命令保持一致：只改 status、不 pop，
+        pop 由 PrismHarnessGuard._acting 真正执行时完成。返回是否有 pending。
         """
         async with self.lock:
-            pending = self.pending_tool_calls.pop(0) if self.pending_tool_calls else None
-        if pending:
-            pending.resolve(approved)
-        return pending
+            if not self.pending_tool_calls:
+                return False
+            self.pending_tool_calls[0].resolve(approved)
+            return True
 
     async def activate(self):
         async with self.lock:
@@ -148,6 +187,8 @@ class Session:
         """获取下一个请求，超时则标记 INACTIVE。"""
         async with self.cond:
             while self.req_queue.empty():
+                if self.status == SessionStatus.INACTIVE:
+                    return None, self.status
                 try:
                     await asyncio.wait_for(self.cond.wait(), timeout=1)
                 except asyncio.TimeoutError:
@@ -177,6 +218,12 @@ class Session:
                     pass
             self.pending_req.clear()
             self.pending_tool_calls.clear()
+
+    async def shutdown(self):
+        """标记 INACTIVE 并唤醒等待中的 agent_runner，使其退出循环。"""
+        async with self.cond:
+            self.status = SessionStatus.INACTIVE
+            self.cond.notify_all()
 
 
 class SessionManager:
@@ -214,6 +261,7 @@ class SessionManager:
             sess = self.sessions.pop(session_id, None)
             if sess:
                 await sess.release()
+                await sess.shutdown()
 
     def temp_session(self) -> Session:
         return Session(str(uuid.uuid4()), expires=self.expires)

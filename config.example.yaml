@@ -17,6 +17,7 @@ providers:
 agent:
   max_iters: 30
   parallel_tool_calls: false
+  console_output: false
 
 context:
   token_budget: 320000

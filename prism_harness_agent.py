@@ -20,7 +20,7 @@ from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg
 from agentscope.pipeline import stream_printing_messages
 
-from prism_harness_guard import PrismHarnessGuardMixin, PendingStatus
+from prism_harness_guard import PrismHarnessGuardMixin
 from session import Session, SessionManager, AgentRequest, SessionStatus
 from tools import (
     build_toolkit,
@@ -29,7 +29,7 @@ from tools import (
 )
 from model_config import build_model, build_token_counter, load_config
 from context_viz import ContextViz, TokenStats
-from conf import FLAGS
+from conf import FLAGS, console
 
 
 # ---- Mixin 组装：PrismHarnessAgent = PrismHarnessGuard + ReActAgent ----
@@ -188,7 +188,11 @@ async def register_thinking_cleanup(agent: ReActAgent):
 
 async def handle_magic_command(request: AgentRequest, sess: Session):
     """处理 /approve /reject /approve_all 等魔术命令。
-    返回 True 表示已处理（需要重新驱动 agent 继续），False 表示普通消息。"""
+
+    返回 (已处理, 确认文案)：
+    - 已处理=True 表示这是魔术命令，调用方据此决定是否重新驱动 agent；
+    - 确认文案用于「无 pending」时的即时回执（不调 LLM）。
+    """
     text = ""
     if isinstance(request.content, list):
         for block in request.content:
@@ -200,31 +204,41 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
 
     text = text.strip()
     if not text.startswith("/"):
-        return False
+        return False, ""
 
     cmd = text[1:]
     if cmd == "approve":
-        pending = await sess.get_pending_tool()
-        if pending:
-            pending.status = PendingStatus.APPROVED
-            return True  # 有 pending → 需要重新驱动 agent
-        return True  # 没有 pending → 忽略（静默返回）
+        if await sess.approve_head_pending():
+            return True, ""
+        return True, "当前没有等待确认的工具调用。"
     elif cmd == "reject":
-        pending = await sess.get_pending_tool()
-        if pending:
-            pending.status = PendingStatus.REJECTED
-            return True
-        return True
+        if await sess.reject_head_pending():
+            return True, ""
+        return True, "当前没有等待确认的工具调用。"
     elif cmd == "approve_all":
         sess.auto_approve = True
         # 一次性放行队列里所有 pending（并行/批量工具会产生多个 pending，
         # 之前只 APPROVED 队首，导致后面仍逐个弹确认卡、用户被迫反复批准）。
-        await sess.approve_all_pending()
-        return True  # 不管有没有 pending，都要返回（避免 LLM 空转）
+        n = await sess.approve_all_pending()
+        if n:
+            return True, ""
+        return True, "已开启自动放行模式（后续高风险工具将直接执行）。"
     elif cmd == "approve_all off":
         sess.auto_approve = False
-        return True
-    return False  # 不认识的 / 命令，交给 agent 处理
+        return True, "已关闭自动放行模式。"
+    elif cmd.startswith("answer"):
+        # /answer <json> —— 用户回答了结构化提问（ask_user_question）
+        raw = cmd[len("answer"):].strip()
+        answer = None
+        if raw:
+            try:
+                answer = json.loads(raw)
+            except Exception:
+                answer = {"free_text": raw}
+        if answer is not None and await sess.answer_pending(answer):
+            return True, ""
+        return True, "当前没有等待回答的问题。"
+    return False, ""  # 不认识的 / 命令，交给 agent 处理
 
 
 # ---- Agent Runner（每会话一个后台任务） ----
@@ -237,6 +251,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     log_dir = cfg.get("logging", {}).get("dir", "session_logs")
 
     viz = ContextViz(log_dir, sess.session_id)
+    console("[session-start]", sess.session_id)
 
     # 整个会话复用同一个 Agent（保留 memory，实现多轮上下文真实累积）
     toolkit = await build_toolkit(workspace_dir)
@@ -273,7 +288,10 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         compression_config=compression_config,
         _prism_harness_sess=sess,
     )
-    agent.set_console_output_enabled(False)
+    # 控制台输出：默认关闭，避免终端刷屏；流式输出走 msg_queue，不受影响。
+    agent.set_console_output_enabled(
+        bool(cfg.get("agent", {}).get("console_output", False)),
+    )
 
     # 记录当前 LLM 配置签名，用于每轮热重载判断是否需要重建 model。
     last_llm_sig = None
@@ -326,6 +344,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     while True:
         request, status = await sess.get_request()
         if status == SessionStatus.INACTIVE:
+            console("[session-end]", sess.session_id)
             viz.commit()  # 最后一次落盘（同步方法，返回 md 路径）
             await sess.release()
             break
@@ -345,7 +364,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         agent.toolkit = await build_toolkit(workspace_dir)
 
         # 魔术命令
-        is_magic = await handle_magic_command(request, sess)
+        is_magic, magic_ack = await handle_magic_command(request, sess)
         pending_exists = bool(await sess.get_pending_tool()) if is_magic else False
 
         # 独立魔法命令（无 pending）：直接返回确认，不调 LLM
@@ -355,7 +374,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                 "type": "status",
                 "phase": "thinking",
                 "step": 0,
-                "detail": ("已开启自动放行模式" if sess.auto_approve else "已执行"),
+                "detail": magic_ack or "已执行",
             })
             await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
             await response_q.put(None)
@@ -385,7 +404,14 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             sys_chars = len(system_prompt)
             sys_tokens_est = sys_chars  # CJK 简化估算
 
-            inputs = Msg(name="user", content=request.content, role="user")
+            # 魔术命令（/approve /approve_all 等）：命令文本不要写进 memory。
+            # 用 None 重新驱动 agent（reply(None) 不会 add 任何消息），
+            # 让 guard._reasoning 读到已 APPROVED/REJECTED 的 pending 继续执行。
+            inputs = (
+                None
+                if is_magic
+                else Msg(name="user", content=request.content, role="user")
+            )
 
             q = asyncio.Queue()
 
@@ -483,6 +509,20 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                                     if raw_text and isinstance(raw_text, str) and len(raw_text) > 2:
                                         preview = raw_text[:80].replace("\n", " ").strip()
                                         current_phase["text"] = f"推理中… {preview}"
+                                    # 结构化提问 → 推 question 事件（携带问题数据，前端渲染选择卡片）
+                                    if raw_text and "需要你的选择" in raw_text:
+                                        current_phase["text"] = "等待你回答"
+                                        pending = await sess.get_pending_tool()
+                                        questions = []
+                                        if pending and pending.name == "ask_user_question" and isinstance(pending.input, dict):
+                                            questions = pending.input.get("questions", [])
+                                        await q.put({
+                                            "type": "status",
+                                            "phase": "question",
+                                            "detail": raw_text,
+                                            "questions": questions,
+                                        })
+                                        continue
                                     # HITL 等待确认 → 推专门的 confirm 事件，前端直接渲染卡片（不重复发文本）
                                     if raw_text and "工具调用需要确认" in raw_text and "🔒" in raw_text:
                                         current_phase["text"] = "等待你确认工具调用"
@@ -670,7 +710,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                     terminal_phase = "canceled"
                     await q.put({"cancel": True, "last": True, "contents": []})
                 except Exception as e:
-                    print(f"[PrismHarness] Error: {e}\n{traceback.format_exc()}")
+                    console("[error]", e)
+                    traceback.print_exc()
                     terminal_phase = "error"
                     await q.put({
                         "type": "status",
@@ -748,7 +789,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             viz.commit()
 
         except Exception as e:
-            print(f"[PrismHarness] Runner error: {e}\n{traceback.format_exc()}")
+            console("[runner-error]", e)
+            traceback.print_exc()
         finally:
             await response_q.put(None)
             await sess.finish_request(request)

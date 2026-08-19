@@ -1,5 +1,14 @@
 """PrismHarness 功能开关。统一管理所有可选功能的启用/禁用。"""
 
+import time
+
+
+def console(*parts):
+    """带时间戳的控制台日志，统一输出格式（flush 保证及时显示）。"""
+    ts = time.strftime("%H:%M:%S")
+    print(f"{ts} " + " ".join(str(p) for p in parts), flush=True)
+
+
 FLAGS = {
     # 核心工具
     "enable_view_text_file": True,
@@ -10,7 +19,7 @@ FLAGS = {
 
     # 高级功能
     "enable_websearch": True,
-    "enable_subagent": False,
+    "enable_subagent": True,
     "enable_cron": True,
     "enable_sandbox": False,
 
@@ -25,6 +34,7 @@ GUARD_TOOLS = [
     "insert_text_file",
     "run_shell",
     "download_file",
+    "ask_user_question",
 ]
 
 # 高风险工具等待用户确认的超时时间(秒)，超时后自动拒绝，防止进程永久挂起
