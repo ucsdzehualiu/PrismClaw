@@ -244,9 +244,13 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     model = build_model(cfg, stream=True)
     token_counter = build_token_counter(cfg)
     compression_config = None
+    # 记忆压缩关闭（enable=False）：agentscope 的 _compress_memory_if_needed 在
+    # 遍历 memory 时若遇到缺少 "type" 键的 content block 会直接 KeyError 崩溃，
+    # 导致该会话的 agent 轮次中断、后续请求卡死（本地 vLLM 200k 上下文 + 较高
+    # token_budget，压缩阈值远超模型上限，本身基本不会触发，关闭零损失却消除崩溃源）。
     if ctx_cfg.get("compress_threshold"):
         compression_config = ReActAgent.CompressionConfig(
-            enable=True,
+            enable=False,
             agent_token_counter=token_counter,
             trigger_threshold=int(
                 token_budget * float(ctx_cfg.get("compress_threshold", 0.8)),
@@ -300,7 +304,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         n_ctx = new_cfg.get("context", {})
         if n_ctx.get("compress_threshold") and hasattr(agent, "compression_config"):
             compression_config = ReActAgent.CompressionConfig(
-                enable=True,
+                enable=False,  # 见上：关闭以规避 agentscope 压缩遇畸形 block 的 KeyError 崩溃
                 agent_token_counter=token_counter,
                 trigger_threshold=int(
                     new_cfg.get("context", {}).get("token_budget", 32000)
@@ -708,8 +712,34 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
 
             request.stream_task = asyncio.create_task(streaming())
             request._cancel_q = q  # 取消时直接往这里灌 cancel 事件，不等 LLM 迭代
+
+            # 单轮整体超时兜底：streaming 内部若因上游异常（如 agentscope 对畸形
+            # block 崩溃、模型流挂起等）迟迟不 put(None)，这里必须强制终止本轮，
+            # 否则 agent_runner 会永久 await q.get() → 该会话此后所有请求都卡死
+            # （表现为"发消息没反应/卡住不动"）。
+            round_timeout = float(cfg.get("agent", {}).get("round_timeout", 600))
             while True:
-                msg = await q.get()
+                try:
+                    msg = await asyncio.wait_for(q.get(), timeout=round_timeout)
+                except asyncio.TimeoutError:
+                    request.stream_task.cancel()
+                    try:
+                        await asyncio.wait_for(request.stream_task, timeout=3)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+                    except Exception:
+                        pass
+                    await response_q.put({
+                        "type": "status",
+                        "phase": "error",
+                        "detail": f"本轮处理超时（>{round_timeout:.0f}s），已强制终止。请重试。",
+                    })
+                    await response_q.put({
+                        "type": "error",
+                        "last": True,
+                        "contents": [],
+                    })
+                    break
                 await response_q.put(msg)
                 if msg is None:
                     break
