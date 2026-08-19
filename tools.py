@@ -172,6 +172,9 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是 PrismHarness，一个透明、高效的 AI
 
 ## 人格设定
 
+### IDENTITY.md
+{identity_md}
+
 ### AGENTS.md
 {agents_md}
 
@@ -195,10 +198,12 @@ def load_persona_file(filename: str, workspace_dir: str = "workspace") -> str:
 
 def format_system_prompt(extra_prompts: List[str], workspace_dir: str = "workspace") -> str:
     """生成完整的 System Prompt，注入人格定义 + 技能正文。"""
+    identity_md = load_persona_file("IDENTITY.md", workspace_dir)
     agents_md = load_persona_file("AGENTS.md", workspace_dir)
     soul_md = load_persona_file("SOUL.md", workspace_dir)
     user_md = load_persona_file("USER.md", workspace_dir)
     return AGENT_SYS_PROMPT_TEMPLATE.format(
+        identity_md=identity_md,
         agents_md=agents_md,
         soul_md=soul_md,
         user_md=user_md,
