@@ -109,10 +109,13 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .session-item.active{background:var(--accent-glow);color:var(--text-primary);font-weight:500}
 .session-item .si-time{font-size:9.5px;color:var(--text-tertiary);margin-left:auto;flex-shrink:0;font-variant-numeric:tabular-nums}
 .session-item .si-title{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.session-item .si-del{flex:none;font-size:13px;line-height:1;color:var(--text-tertiary);cursor:pointer;
-  opacity:0;padding:0 3px;border-radius:3px;transition:opacity var(--transition),color var(--transition)}
+.session-item .si-del{flex:none;display:inline-flex;align-items:center;justify-content:center;
+  min-width:26px;min-height:26px;font-size:15px;line-height:1;color:var(--text-tertiary);cursor:pointer;
+  opacity:0;padding:6px 7px;margin-right:-7px;border-radius:6px;
+  transition:opacity var(--transition),color var(--transition),background var(--transition)}
 .session-item:hover .si-del{opacity:1}
-.session-item .si-del:hover{color:var(--danger)}
+.session-item .si-del:hover{color:var(--danger);background:rgba(255,80,80,.10)}
+.session-item .si-del:active{background:rgba(255,80,80,.20)}
 .session-empty{padding:6px 2px;font-size:11.5px;color:var(--text-tertiary);line-height:1.5}
 
 /* ---- Tabs ---- */
@@ -403,6 +406,10 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
   transition:color var(--transition),border-color var(--transition)}
 .settings-tab:hover{color:var(--text-primary)}
 .settings-tab.active{color:var(--text-primary);border-bottom-color:var(--accent-strong)}
+.settings-tab .tab-dirty{display:inline-block;font-style:normal;font-size:10px;font-weight:600;
+  color:#fff;background:var(--danger,#e5534b);border-radius:8px;padding:0 5px;margin-left:5px;
+  line-height:1.5;vertical-align:1px}
+.settings-tab .tab-dirty[hidden]{display:none}
 .settings-panels{flex:1;overflow-y:auto;padding:18px 20px}
 .settings-panels::-webkit-scrollbar{width:6px}
 .settings-panels::-webkit-scrollbar-thumb{background:var(--border-l2);border-radius:3px}
@@ -564,11 +571,11 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
       <div id="settingsForm" style="display:none">
         <div class="settings-tabs">
           <button class="settings-tab active" data-tab="overview" onclick="switchSettingsTab('overview')">概览</button>
-          <button class="settings-tab" data-tab="model" onclick="switchSettingsTab('model')">模型</button>
-          <button class="settings-tab" data-tab="personas" onclick="switchSettingsTab('personas')">人格</button>
-          <button class="settings-tab" data-tab="features" onclick="switchSettingsTab('features')">功能开关</button>
+          <button class="settings-tab" data-tab="model" onclick="switchSettingsTab('model')">模型<i class="tab-dirty" hidden>·未保存</i></button>
+          <button class="settings-tab" data-tab="personas" onclick="switchSettingsTab('personas')">人格<i class="tab-dirty" hidden>·未保存</i></button>
+          <button class="settings-tab" data-tab="features" onclick="switchSettingsTab('features')">功能开关<i class="tab-dirty" hidden>·未保存</i></button>
           <button class="settings-tab" data-tab="logs" onclick="switchSettingsTab('logs')">日志</button>
-          <button class="settings-tab" data-tab="prefs" onclick="switchSettingsTab('prefs')">偏好</button>
+          <button class="settings-tab" data-tab="prefs" onclick="switchSettingsTab('prefs')">偏好<i class="tab-dirty" hidden>·未保存</i></button>
         </div>
         <div class="settings-panels">
 
@@ -653,6 +660,10 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
                 <input class="field" id="agent_iters" type="number" step="1" min="1">
               </div>
             </div>
+            <div class="setting-group" style="border-top:1px solid var(--border-l1);padding-top:10px">
+              <div class="setting-hint">模型 / API 配置改动点这里保存并热重载，下一轮消息生效。</div>
+              <button class="btn accent" id="saveModelConfigBtn" onclick="saveSettings()">💾 保存模型配置</button>
+            </div>
           </div>
 
           <!-- 人格 -->
@@ -723,7 +734,6 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
     <div class="modal-footer">
       <span id="saveHint" style="font-size:11px;color:var(--text-tertiary);margin-right:auto"></span>
       <button class="btn" onclick="closeSettings()">关闭</button>
-      <button class="btn accent" id="saveModelConfigBtn" onclick="saveSettings()">💾 保存模型配置</button>
     </div>
   </div>
 </div>
@@ -1940,6 +1950,7 @@ function openSettings() {
   document.getElementById('settingsLoading').style.display = 'block';
   document.getElementById('settingsForm').style.display = 'none';
   resetArmed();
+  clearAllDirty();  // 重开时清掉上一次的“未保存”标记
   loadSettings();
 }
 
@@ -2202,9 +2213,36 @@ async function saveSettings() {
     const resp = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const r = await resp.json();
     if (r.status !== 'success') { showToast('保存失败：' + (r.message || '未知错误'), 'error'); }
-    else { showToast('✅ 已保存并热重载，下一轮消息生效', 'success'); updateSidebarModel(); }
+    else { showToast('✅ 已保存并热重载，下一轮消息生效', 'success'); updateSidebarModel(); clearDirty('model'); }
   } catch (e) { showToast('保存失败：' + e.message, 'error'); }
   finally { btn.disabled = false; btn.textContent = '💾 保存模型配置'; }
+}
+
+// ---------- 设置页“未保存”脏标记 ----------
+// 编辑任一可编辑 tab（模型/人格/功能开关/偏好）的字段后，该 tab 标题出现「·未保存」，
+// 保存成功后清除 —— 让"改了哪些还没存"一目了然。
+const DIRTY_TABS = ['model', 'personas', 'features', 'prefs'];
+function dirtyDot(tab) {
+  const t = document.querySelector('.settings-tab[data-tab="' + tab + '"] .tab-dirty');
+  return t || null;
+}
+function markDirty(tab) {
+  const d = dirtyDot(tab);
+  if (d && d.hidden) d.hidden = false;
+}
+function clearDirty(tab) {
+  const d = dirtyDot(tab);
+  if (d && !d.hidden) d.hidden = true;
+}
+function clearAllDirty() { DIRTY_TABS.forEach(clearDirty); }
+// 事件委托：不需要逐个绑定（features 的 checkbox 是动态渲染的）
+document.addEventListener('input', dirtyDelegate);
+document.addEventListener('change', dirtyDelegate);
+function dirtyDelegate(e) {
+  const panel = e.target && e.target.closest ? e.target.closest('.settings-panel') : null;
+  if (!panel) return;
+  const tab = panel.dataset.panel;
+  if (DIRTY_TABS.includes(tab)) markDirty(tab);
 }
 
 // ---------- 人格 ----------
@@ -2230,6 +2268,7 @@ async function savePersonas() {
       });
     }
     showToast('✅ 人格已保存，下一条消息生效', 'success');
+    clearDirty('personas');
     // 更新本地 + 侧边栏
     const pr = await fetch('/get_personas'); settingsPersonas = await pr.json();
   } catch (e) { showToast('保存人格失败：' + e.message, 'error'); }
@@ -2296,7 +2335,7 @@ async function saveFeatures() {
     const resp = await fetch('/api/flags', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     const r = await resp.json();
     if (r.status !== 'success') showToast('保存失败：' + (r.message || '未知错误'), 'error');
-    else showToast('✅ 功能开关已保存，下一轮消息生效', 'success');
+    else { showToast('✅ 功能开关已保存，下一轮消息生效', 'success'); clearDirty('features'); }
   } catch (e) { showToast('保存失败：' + e.message, 'error'); }
 }
 
@@ -2379,6 +2418,7 @@ function savePrefs() {
   document.getElementById('liveStatus').style.display = p.livestatus ? '' : 'none';
   localStorage.setItem(PREFS_KEY, JSON.stringify(p));
   applyPrefs();
+  clearDirty('prefs');
   showToast('✅ 偏好已保存', 'success');
 }
 function loadPrefs() {
