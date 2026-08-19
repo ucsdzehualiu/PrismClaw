@@ -723,7 +723,7 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
     <div class="modal-footer">
       <span id="saveHint" style="font-size:11px;color:var(--text-tertiary);margin-right:auto"></span>
       <button class="btn" onclick="closeSettings()">关闭</button>
-      <button class="btn accent" onclick="saveSettings()">💾 保存模型配置</button>
+      <button class="btn accent" id="saveModelConfigBtn" onclick="saveSettings()">💾 保存模型配置</button>
     </div>
   </div>
 </div>
@@ -2194,7 +2194,9 @@ async function saveSettings() {
     providers: settingsState.providers,
     agent: { max_iters: settingsState.agent.max_iters },
   };
-  const btn = document.querySelector('#settingsModal .btn.accent');
+  // 用明确 id 定位底部「保存模型配置」按钮（避免 querySelector 选到设置内第一个 .btn.accent，
+  // 否则“保存中…”会显示在「测试模型连通性」等其它按钮上）
+  const btn = document.getElementById('saveModelConfigBtn');
   btn.disabled = true; btn.textContent = '保存中…';
   try {
     const resp = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });

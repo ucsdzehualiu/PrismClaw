@@ -386,13 +386,26 @@ async def read_log(session: str, file: str = ""):
 
 @app.get("/api/session/transcript")
 async def session_transcript(session: str):
-    """从 session_logs 的 snapshots 重建某会话的对话记录，供前端恢复空/丢失的会话。"""
+    """从 session_logs 的 snapshots 重建某会话的对话记录，供前端恢复空/丢失的会话。
+
+    注意：每轮快照的 messages 是「累积历史」，且只存截断到 160 字符的 preview；
+    旧实现取第一条 user/assistant，会导致多轮会话每一轮都错位成第一轮内容。
+    这里改为：user 取每轮真实的新输入 user_input，assistant 取该轮 full_messages
+    里最后一条 assistant（完整、不截断）；老快照无 full_messages 时降级用
+    messages[].preview 的最后一条 assistant。
+    """
     if not re.match(r"^[A-Za-z0-9_-]{1,64}$", session):
         return {"status": "error", "message": "非法 session 名"}
     p = os.path.join(LOG_DIR, session)
     if not os.path.isdir(p):
         return {"status": "error", "message": "会话不存在"}
     snap_dir = os.path.join(p, "snapshots")
+
+    def _text_of(m):
+        if not isinstance(m, dict):
+            return ""
+        return str(m.get("preview") or m.get("content") or m.get("text") or "").strip()
+
     rounds = []
     if os.path.isdir(snap_dir):
         for fn in sorted(os.listdir(snap_dir)):
@@ -403,19 +416,33 @@ async def session_transcript(session: str):
                     d = json.load(f)
             except Exception:
                 continue
-            user_text = ""
+            # 本轮真实的新输入（快照单独记录，最可靠、不错位）
+            user_text = str(d.get("user_input") or "").strip()
+
+            # 助手回复：优先取 full_messages 里最后一条 assistant（完整内容）
             asst_text = ""
-            for m in (d.get("messages") or []):
-                role = m.get("role")
-                txt = str(m.get("preview") or m.get("content") or m.get("text") or "").strip()
-                if not txt:
-                    continue
-                if role == "user" and not user_text:
-                    user_text = txt
-                elif role == "assistant" and not asst_text:
-                    asst_text = txt
+            fm = d.get("full_messages") or []
+            if isinstance(fm, list):
+                for m in fm:
+                    if isinstance(m, dict) and m.get("role") == "assistant":
+                        t = _text_of(m)
+                        if t:
+                            asst_text = t
+            # 老快照无 full_messages → 降级用 preview 里最后一条 assistant
+            if not asst_text:
+                for m in (d.get("messages") or []):
+                    if isinstance(m, dict) and m.get("role") == "assistant":
+                        t = _text_of(m)
+                        if t:
+                            asst_text = t
+            # 兜底：仍无 user 就用该轮第一条 user preview
             if not user_text:
-                user_text = str(d.get("user_input") or "").strip()
+                for m in (d.get("messages") or []):
+                    if isinstance(m, dict) and m.get("role") == "user":
+                        t = _text_of(m)
+                        if t:
+                            user_text = t
+                            break
             mm = re.search(r"(\d+)", fn)
             rn = int(mm.group(1)) if mm else (d.get("round") or 0)
             if user_text or asst_text:
