@@ -105,6 +105,20 @@ class Session:
         async with self.lock:
             return self.pending_tool_calls.pop(0) if self.pending_tool_calls else None
 
+    async def approve_all_pending(self) -> int:
+        """把所有待确认工具全部置为 APPROVED（供 /approve_all）。
+
+        只放行队首会让并行/批量工具产生的多个 pending 逐个继续弹确认卡，
+        表现为"approve_all 后还一直问我要不要执行"。这里一次性全放行。
+        返回被置为 APPROVED 的个数。
+        """
+        async with self.lock:
+            n = 0
+            for p in self.pending_tool_calls:
+                p.status = PendingToolUse.APPROVED
+                n += 1
+            return n
+
     async def resolve_pending(self, approved: bool) -> Optional[PendingToolUse]:
         """取出头部 pending 并 resolve 其 future。供 /approve /reject 调用。
 

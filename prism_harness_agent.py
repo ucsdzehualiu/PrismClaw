@@ -217,9 +217,9 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
         return True
     elif cmd == "approve_all":
         sess.auto_approve = True
-        pending = await sess.get_pending_tool()
-        if pending:
-            pending.status = PendingStatus.APPROVED
+        # 一次性放行队列里所有 pending（并行/批量工具会产生多个 pending，
+        # 之前只 APPROVED 队首，导致后面仍逐个弹确认卡、用户被迫反复批准）。
+        await sess.approve_all_pending()
         return True  # 不管有没有 pending，都要返回（避免 LLM 空转）
     elif cmd == "approve_all off":
         sess.auto_approve = False
