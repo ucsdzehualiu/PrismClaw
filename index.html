@@ -544,8 +544,9 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
         <div class="context-content" id="contextContent">
           <div class="context-empty" id="contextEmpty">
             <div class="prism-harness-icon">▣</div>
-            <div>Agent 实际收到的上下文<br>将在这里逐轮展开</div>
+            <div>模型每一步看到的上下文与回复<br>会在这里逐轮展开</div>
           </div>
+          <div id="contextSteps" style="display:none"></div>
           <div id="contextData" style="display:none"></div>
         </div>
       </div>
@@ -988,6 +989,18 @@ async function sendMessage() {
             continue;
           }
 
+          // Handle request_payload event（每步模型真实收到的输入）
+          if (event.type === 'request_payload' || (event.data && event.data.type === 'request_payload')) {
+            updateModelContext(event.data || event, 'request_payload');
+            continue;
+          }
+
+          // Handle model_reply event（模型该步的真实回复）
+          if (event.type === 'model_reply' || (event.data && event.data.type === 'model_reply')) {
+            updateModelContext(event.data || event, 'model_reply');
+            continue;
+          }
+
           // Process contents via messageBlocks (AgentScope sends accumulated text per msg_id)
           if (event.contents && Array.isArray(event.contents)) {
             const msgId = event.msg_id || 'msg0';
@@ -1334,6 +1347,16 @@ async function sendMagic(cmd) {
             updateContextView(event.data || event);
             continue;
           }
+
+          if (event.type === 'request_payload' || (event.data && event.data.type === 'request_payload')) {
+            updateModelContext(event.data || event, 'request_payload');
+            continue;
+          }
+
+          if (event.type === 'model_reply' || (event.data && event.data.type === 'model_reply')) {
+            updateModelContext(event.data || event, 'model_reply');
+            continue;
+          }
         } catch (e) {}
       }
     }
@@ -1410,124 +1433,191 @@ function toggleToolCard(id) {
 
 // ====== Context Spectrum (核心差异化) ======
 function updateContextView(data) {
-  contextEmpty.style.display = 'none';
-  contextData.style.display = 'block';
-
-  const roundNum = data.round || contextRound;
-  // 同一轮只保留一个块：每次调 API 推来的 context_view 更新同轮，不无限累积
-  contextData.querySelectorAll('.context-round[data-round="' + roundNum + '"]').forEach(rd => rd.remove());
-  const roundDiv = document.createElement('div');
-  roundDiv.className = 'context-round';
-  roundDiv.dataset.round = roundNum;
-  roundDiv.style.cssText = 'border:1px solid var(--border);border-radius:var(--radius);margin-bottom:12px;overflow:hidden';
-
-  // 本轮已出现过多次调 API：给轮次标题加个"实时发送"标记，区分于(最终)完整快照
-  const isLiveSend = !!(data.full_messages && !data.token_stats && !data.full_system);
-  const roundLabel = isLiveSend ? `第 ${roundNum} 轮 · 本次发送` : `第 ${roundNum} 轮`;
-
-  let html = `<div style="padding:8px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-    <span style="font-size:13px;font-weight:600;color:var(--text-bright)">${roundLabel}</span>
-    <span style="font-size:10px;color:var(--text-dim);font-family:var(--font-mono)">${(data.timestamp || '').substring(11, 19)}</span>
-  </div>`;
-
-  html += '<div style="padding:10px">';
-
-  // User input
-  if (data.user_input) {
-    html += `<div class="context-section">
-      <div class="section-title">用户输入</div>
-      <div style="background:var(--bg-input);border-radius:var(--radius-sm);padding:6px 10px;font-size:13px;color:var(--text);border-left:3px solid var(--accent)">
-        ${escapeHtml(data.user_input.substring(0, 200))}
-      </div>
-    </div>`;
+  const d = data || {};
+  // 新的一轮：重置元信息与会话级步骤轨迹，避免上一轮的 token/system 残留到本轮。
+  const round = d.round || modelContextRound;
+  if (round && round !== modelContextRound) {
+    modelContextRound = round;
+    modelContextMeta = { token_stats: null, full_system: null, user_input: null };
+    modelSteps.clear();
   }
+  if (d.token_stats) modelContextMeta.token_stats = d.token_stats;
+  if (d.full_system) modelContextMeta.full_system = d.full_system;
+  if (d.user_input) modelContextMeta.user_input = d.user_input;
 
-  // 📜 完整 Prompt 检视器（模型本轮实际看到的全部 messages）
-  if (data.full_messages && data.full_messages.length) {
-    html += `<div class="context-section">
-      <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
-        <span>📜 完整 Prompt（共 ${data.full_messages.length} 块 · 模型真实所见）</span>
-        <span class="prompt-toggle-all" onclick="toggleAllPromptBlocks(this)">全部展开 ▾</span>
-      </div>
-      <div class="prompt-blocks">`;
-    data.full_messages.forEach((m, i) => {
-      const role = (m.role || 'unknown').toLowerCase();
-      const chars = (m.chars != null) ? m.chars : (m.content || '').length;
-      const tag = role.toUpperCase();
-      html += `<div class="prompt-block role-${role}">
+  // 统一到单一面板：退役旧的 contextData 第二面板，避免两个"模型上下文"叠加显示。
+  if (contextData) contextData.style.display = 'none';
+  contextEmpty.style.display = 'none';
+  const stepsDiv = document.getElementById('contextSteps');
+  if (stepsDiv) stepsDiv.style.display = 'block';
+  renderModelSteps();
+}
+
+// ====== 模型实际收到的完整请求（发送时拦截的 100% 真实 payload，逐字未截断）======
+// 这是"模型看见的上下文"的权威视图：真实 messages 全文 + 真实 tools schema + 采样参数。
+function _renderApiMsg(m, i) {
+  const role = (m.role || 'unknown').toLowerCase();
+  const tag = role.toUpperCase();
+  // content: string / list[block] / null
+  let text = '';
+  const content = m.content;
+  if (typeof content === 'string') {
+    text = content;
+  } else if (Array.isArray(content)) {
+    text = content.map(b => {
+      if (typeof b === 'string') return b;
+      if (b && b.type === 'text') return b.text || '';
+      if (b && b.type === 'image_url') return '[图片]';
+      if (b && b.type === 'input_audio') return '[音频]';
+      return JSON.stringify(b);
+    }).join('\n\n');
+  } else if (content != null) {
+    text = String(content);
+  }
+  const chars = (typeof text === 'string') ? text.length : 0;
+  // assistant 的 tool_calls
+  let extra = '';
+  if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+    const calls = m.tool_calls.map(t => {
+      const fn = t.function || {};
+      const args = (typeof fn.arguments === 'string') ? fn.arguments
+        : JSON.stringify(fn.arguments || {});
+      return `→ ${fn.name || ''}(${args})`;
+    }).join('\n');
+    text = (text ? text + '\n' : '') + calls;
+  }
+  if (m.tool_call_id) {
+    extra = `<span class="pb-chars">call_id: ${escapeHtml(m.tool_call_id)}</span>`;
+  }
+  return `<div class="prompt-block role-${role}">
+    <div class="pb-header" onclick="this.parentElement.classList.toggle('open')">
+      <span class="pb-idx">#${i}</span>
+      <span class="role-tag">${escapeHtml(tag)}</span>
+      <span class="pb-chars">${chars.toLocaleString()} 字</span>
+      ${extra}
+      <span class="pb-arrow">▶</span>
+    </div>
+    <div class="pb-body"><pre>${escapeHtml(text || '(空)')}</pre></div>
+  </div>`;
+}
+
+// ====== 模型上下文轨迹：每步"输入消息 + 模型回复"，忠实还原模型真实所见 ======
+const modelSteps = new Map();
+let modelContextTools = null;
+// 轮次级元信息（来自 round-end 的 context_view：token 预算 + System Prompt 全文 + 用户输入）。
+// 统一并入 contextSteps 单一面板，不再用第二个 contextData 面板重复展示。
+let modelContextMeta = { token_stats: null, full_system: null, user_input: null };
+let modelContextRound = 0;
+
+function updateModelContext(data, eventType) {
+  const stepsDiv = document.getElementById('contextSteps');
+  if (!stepsDiv) return;
+  contextEmpty.style.display = 'none';
+  stepsDiv.style.display = 'block';
+  if (eventType === 'request_payload') {
+    const s = data.step;
+    const rec = modelSteps.get(s) || {};
+    rec.step = s;
+    rec.params = data.params || {};
+    rec.messages = data.messages || [];
+    if (data.tools && data.tools.length) modelContextTools = data.tools;
+    modelSteps.set(s, rec);
+  } else if (eventType === 'model_reply') {
+    const s = data.step;
+    const rec = modelSteps.get(s) || {};
+    rec.step = s;
+    rec.reply = data.reply;
+    modelSteps.set(s, rec);
+  }
+  renderModelSteps();
+}
+
+function _renderParamsBar(p) {
+  p = p || {};
+  const prow = (k, v) =>
+    `<span style="display:inline-block;margin:2px 12px 2px 0;font-size:11px"><span style="color:var(--text-dim)">${escapeHtml(k)}:</span> <span style="color:var(--text-bright);font-family:var(--font-mono)">${escapeHtml(String(v ?? '—'))}</span></span>`;
+  return `<div style="padding:6px 10px;background:var(--bg-input);border-radius:var(--radius-sm);margin-bottom:8px;font-size:11px;line-height:1.9;border-left:3px solid var(--accent)">` +
+    prow('model', p.model) + prow('temperature', p.temperature) + prow('thinking', p.thinking) +
+    prow('tool_choice', JSON.stringify(p.tool_choice)) + `</div>`;
+}
+
+function renderModelSteps() {
+  const stepsDiv = document.getElementById('contextSteps');
+  if (!stepsDiv) return;
+  const steps = Array.from(modelSteps.values()).sort((a, b) => a.step - b.step);
+  let h = '';
+  // 本轮概览：来自 round-end context_view 的 token 预算 + System Prompt 全文 + 用户输入。
+  // 并入单一面板顶部，不再用第二个 contextData 面板重复展示。
+  const meta = modelContextMeta || {};
+  if (meta.token_stats || meta.full_system || meta.user_input) {
+    h += '<div class="context-section"><div class="section-title">本轮概览</div><div class="prompt-blocks">';
+    if (meta.token_stats) {
+      const ts = meta.token_stats;
+      const pct = ts.pct || 0;
+      const cls = pct > 80 ? 'danger' : pct > 60 ? 'warn' : 'safe';
+      h += `<div class="token-bar">
+        <div class="bar-label"><span>Token 预算</span><span>${(ts.total||0).toLocaleString()} / ${(ts.budget||0).toLocaleString()}</span></div>
+        <div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(pct,100)}%"></div></div>
+        <div class="bar-detail"><span>Sys: ${(ts.system||0).toLocaleString()}</span><span>Hist: ${(ts.history||0).toLocaleString()}</span><span>${pct}%</span></div>
+      </div>`;
+    }
+    if (meta.full_system) {
+      h += `<div class="context-block">
+        <div class="block-header" onclick="this.parentElement.classList.toggle('open')">
+          <span>System Prompt 全文（模型实际收到）</span>
+          <span class="size">${meta.full_system.length.toLocaleString()}字</span>
+        </div>
+        <div class="block-body" style="max-height:500px">${escapeHtml(meta.full_system)}</div>
+      </div>`;
+    }
+    if (meta.user_input) {
+      h += `<div class="context-block">
+        <div class="block-header" onclick="this.parentElement.classList.toggle('open')">
+          <span>本轮用户输入</span>
+          <span class="size">${(meta.user_input.length||0).toLocaleString()}字</span>
+        </div>
+        <div class="block-body" style="max-height:300px">${escapeHtml(meta.user_input)}</div>
+      </div>`;
+    }
+    h += '</div></div>';
+  }
+  // 工具定义（全局只展示一次）
+  if (modelContextTools && modelContextTools.length) {
+    h += `<div class="context-section"><div class="section-title">工具定义（共 ${modelContextTools.length} 个）</div><div class="prompt-blocks">`;
+    modelContextTools.forEach((t, i) => {
+      const fn = t.function || t;
+      const name = fn.name || '(未命名)';
+      const desc = fn.description || '';
+      const params = fn.parameters ? JSON.stringify(fn.parameters, null, 2) : '(无参数)';
+      h += `<div class="prompt-block role-tool">
         <div class="pb-header" onclick="this.parentElement.classList.toggle('open')">
           <span class="pb-idx">#${i}</span>
-          <span class="role-tag">${escapeHtml(tag)}</span>
-          <span class="pb-chars">${chars.toLocaleString()} 字</span>
+          <span class="role-tag">TOOL</span>
+          <span class="pb-chars">${escapeHtml(name)}</span>
           <span class="pb-arrow">▶</span>
         </div>
-        <div class="pb-body"><pre>${escapeHtml(m.content || '')}</pre></div>
+        <div class="pb-body"><pre>${escapeHtml(desc + '\n\n参数 schema:\n' + params)}</pre></div>
       </div>`;
     });
-    html += `</div></div>`;
+    h += `</div></div>`;
   }
-
-  // Tool calls in this round
-  if (data.tool_calls && data.tool_calls.length) {
-    html += `<div class="context-section">
-      <div class="section-title">工具调用 (${data.tool_calls.length}次)</div>`;
-    for (const t of data.tool_calls) {
-      const params = JSON.stringify(t.params || t.parameters || {});
-      const result = typeof t.result === 'string' ? t.result : JSON.stringify(t.result || '');
-      html += `<div style="background:var(--bg-card);border-radius:var(--radius-sm);padding:6px 10px;margin-bottom:4px;border-left:3px solid var(--orange);font-size:12px">
-        <div style="color:var(--orange);font-weight:600">Step ${t.step}: ${escapeHtml(t.tool || t.tool_name || '')}</div>
-        <div style="color:var(--text-dim);font-family:var(--font-mono);font-size:11px;margin-top:2px">参数: ${escapeHtml(params.substring(0, 150))}</div>
-        ${result ? `<div style="color:var(--success);font-size:11px;margin-top:2px">结果: ${escapeHtml(result)}</div>` : ''}
-      </div>`;
-    }
-    html += `</div>`;
-  }
-
-  // Token bar
-  if (data.token_stats) {
-    const ts = data.token_stats;
-    const cls = ts.pct > 80 ? 'danger' : ts.pct > 60 ? 'warn' : 'safe';
-    html += `<div class="token-bar">
-      <div class="bar-label"><span>Token 预算</span><span>${ts.total?.toLocaleString() || 0} / ${ts.budget?.toLocaleString() || 0}</span></div>
-      <div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(ts.pct||0,100)}%"></div></div>
-      <div class="bar-detail"><span>Sys: ${ts.system?.toLocaleString()||0}</span><span>Hist: ${ts.history?.toLocaleString()||0}</span><span>${ts.pct||0}%</span></div>
-    </div>`;
-  }
-
-  // System Prompt 完整全文（LLM 实际收到）
-  if (data.full_system) {
-    html += `<div class="context-section">
-      <div class="section-title">📋 System Prompt 全文（LLM 实际收到）</div>
-      <div class="context-block">
-        <div class="block-header" onclick="this.parentElement.classList.toggle('open')">
-          <span>📄 完整 System Prompt</span>
-          <span class="size">${data.full_system.length.toLocaleString()}字</span>
-        </div>
-        <div class="block-body" style="max-height:500px">${escapeHtml(data.full_system)}</div>
+  steps.forEach((rec, idx) => {
+    const isLast = idx === steps.length - 1;
+    let body = _renderParamsBar(rec.params);
+    body += `<div class="section-title">模型输入消息（${rec.messages ? rec.messages.length : 0} 条）</div>`;
+    body += `<div class="prompt-blocks">${(rec.messages || []).map((m, i) => _renderApiMsg(m, i)).join('')}</div>`;
+    body += rec.reply
+      ? `<div class="section-title">模型回复</div><div class="prompt-blocks">${_renderApiMsg(rec.reply, 0)}</div>`
+      : `<div style="font-size:12px;color:var(--text-dim);padding:4px 2px">（等待模型回复…）</div>`;
+    h += `<div class="context-step" style="border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden">
+      <div class="step-header" style="padding:8px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text-bright);cursor:pointer;display:flex;justify-content:space-between" onclick="const b=this.parentElement.querySelector('.step-body'); b.style.display = b.style.display==='block'?'none':'block'">
+        <span>第 ${rec.step} 步${isLast ? ' · 最新' : ''}</span>
+        <span>${isLast ? '▼' : '▶'}</span>
       </div>
+      <div class="step-body" style="padding:10px;display:${isLast ? 'block' : 'none'}">${body}</div>
     </div>`;
-  }
-
-  // System prompt blocks (collapsible)
-  if (data.system_blocks && data.system_blocks.length) {
-    html += `<div class="context-section">
-      <div class="section-title">System Prompt (${data.system_blocks.length}块)</div>`;
-    for (const b of data.system_blocks) {
-      html += `<div class="context-block">
-        <div class="block-header" onclick="this.parentElement.classList.toggle('open')">
-          <span>📄 ${escapeHtml(b.name)}</span>
-          <span class="size">${b.chars?.toLocaleString()}字</span>
-        </div>
-        <div class="block-body">${escapeHtml(b.content || b.preview || '')}</div>
-      </div>`;
-    }
-    html += `</div>`;
-  }
-
-  html += '</div>'; // close padding div
-  roundDiv.innerHTML = html;
-  contextData.appendChild(roundDiv);
-  contextContent.scrollTop = contextContent.scrollHeight;
+  });
+  stepsDiv.innerHTML = h;
 }
 
 // 完整 Prompt 检视器：全部展开 / 折叠
@@ -1818,7 +1908,12 @@ function clearCurrentUI() {
   // 重置运行时状态
   messages = []; toolCalls = []; messageBlocks = new Map();
   messageIdOrder = []; lastAsstId = ''; lastAsstMsg = null;
-  currentTraceUserText = ''; toolStepCounter = 0; contextRound = 0;
+  currentTraceUserText = ''; toolStepCounter = 0;
+  // 重置上下文轨迹（单一面板）状态，避免上一个会话的步骤残留
+  modelContextRound = 0;
+  modelSteps.clear();
+  modelContextTools = null;
+  modelContextMeta = { token_stats: null, full_system: null, user_input: null };
   traceToolSteps = new Map();
   if (abortController) abortController.abort();
   showStopButton(false);

@@ -107,7 +107,12 @@ app.add_middleware(
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(BASE_DIR, "index.html"))
+    # 开发期禁止缓存 HTML：否则改完前端、同一标签页刷新仍加载旧页面，
+    # 表现为"上下文面板有 Prompt/工具块、却缺实际请求参数块"等只改了前端却看不到的现象。
+    return FileResponse(
+        os.path.join(BASE_DIR, "index.html"),
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
 
 
 @app.get("/get_personas")

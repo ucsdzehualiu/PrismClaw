@@ -31,6 +31,136 @@ from model_config import build_model, build_token_counter, load_config
 from context_viz import ContextViz, TokenStats
 from conf import FLAGS, console
 
+# ── 请求级探针：在真正发 HTTP 前拦截 OpenAI client 的 create()，
+#    拿到 100% 真实的请求 payload（model/temperature/thinking/stream/tools…），
+#    这些是 ModelContextProbe 那层（只拿到上层传的 prompt/kwargs）永远碰不到的。
+_REQUEST_SINK = {"emit": None}
+
+
+def _msg_text(m) -> str:
+    """把 OpenAI 格式消息的 content（str 或 block 列表）压成可检索文本。"""
+    c = m.get("content") if isinstance(m, dict) else None
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        parts = []
+        for b in c:
+            if isinstance(b, dict):
+                t = b.get("type", "")
+                if t == "text":
+                    parts.append(str(b.get("text", "")))
+                elif t == "tool_use":
+                    parts.append(str(b.get("name", "")))
+                else:
+                    parts.append(str(b.get("text", b.get("content", ""))))
+            else:
+                parts.append(str(b))
+        return "\n".join(parts)
+    return str(c) if c is not None else ""
+
+
+def _is_internal_hint_msg(m) -> bool:
+    """注册在 memory 里的"内部信息，非用户输入"提示（role=user）属于实现噪声，
+    必须从展示给用户的上下文里剔除——否则面板会凭空多出一个 user 消息，
+    且这块噪声也会被原样发给模型、浪费 token。注意 content 可能是 block 列表，
+    不能用 isinstance(str) 判断，必须展开 block 文本再匹配。"""
+    return (
+        isinstance(m, dict)
+        and m.get("role") == "user"
+        and "内部信息，非用户输入" in _msg_text(m)
+    )
+
+
+def _extract_payload(kwargs: dict) -> dict:
+    """从最终请求 payload 抽取模型真实收到的全部内容，逐字保留、不丢任何东西。
+
+    - messages: 真正发给模型的 messages（含 system 提示，未经截断）——这就是"模型看见的上下文"主体
+    - tools:    真正发给模型的工具 schema（完整）
+    - params:   采样/元数据参数（model/temperature/thinking/stream…），probe 层永远碰不到
+    """
+    eb = kwargs.get("extra_body") or {}
+    ct = eb.get("chat_template_kwargs") or {}
+    return {
+        "params": {
+            "model": kwargs.get("model"),
+            "temperature": kwargs.get("temperature"),
+            "top_p": kwargs.get("top_p"),
+            "max_tokens": kwargs.get("max_tokens"),
+            "stream": kwargs.get("stream"),
+            "reasoning_effort": kwargs.get("reasoning_effort"),
+            # dsv4 thinking 开关（vLLM 走 chat_template_kwargs.enable_thinking）
+            "thinking": ct.get("enable_thinking"),
+            "tool_choice": kwargs.get("tool_choice"),
+            "response_format": "set" if kwargs.get("response_format") else None,
+        },
+        # 完整 messages 原样透传（前端负责渲染），不计数不摘要
+        # 仅剔除 register_reasoning_hint 注入的"内部信息"提示（role=user 的实现噪声），
+        # 其余 100% 保留——包括 system/assistant/tool。content 可能是 block 列表，
+        # 因此用 _is_internal_hint_msg 展开 block 文本再判定。
+        "messages": [
+            m for m in (kwargs.get("messages") or [])
+            if not _is_internal_hint_msg(m)
+        ],
+        "tools": kwargs.get("tools") or [],
+        # 完整顶层字段名清单——直接证明这是 100% 真实 payload
+        "raw_keys": sorted(kwargs.keys()),
+    }
+
+
+def _wrap_openai_client(model, sink: dict):
+    """包一层 model.client.chat.completions 的 create/stream/parse，
+    在真正把请求发出去之前把最终 kwargs 交给 sink.emit。
+    这样能拿到 100% 真实的请求 payload（model/temperature/thinking/stream/tools…），
+    这些是 ModelContextProbe 那层（只拿到上层传的 prompt/kwargs）永远碰不到的。"""
+    import asyncio
+
+    client = getattr(model, "client", None)
+    if client is None:
+        return
+    try:
+        completions = client.chat.completions
+    except Exception:
+        return
+    orig_create = completions.create
+    orig_stream = getattr(completions, "stream", None)
+    orig_parse = getattr(completions, "parse", None)
+
+    async def _capture(kwargs):
+        emit = sink.get("emit_request_payload")
+        if emit is None:
+            return
+        try:
+            sink["step"] = sink.get("step", 0) + 1
+            payload = _extract_payload(kwargs)
+            payload["step"] = sink["step"]
+            await emit(payload)
+        except Exception:
+            pass
+
+    async def patched_create(**kwargs):
+        await _capture(kwargs)
+        return await orig_create(**kwargs)
+
+    completions.create = patched_create
+
+    if orig_stream is not None:
+        def patched_stream(**kwargs):
+            try:
+                loop = asyncio.get_event_loop()
+                loop.create_task(_capture(kwargs))
+            except Exception:
+                pass
+            return orig_stream(**kwargs)
+
+        completions.stream = patched_stream
+
+    if orig_parse is not None:
+        async def patched_parse(**kwargs):
+            await _capture(kwargs)
+            return await orig_parse(**kwargs)
+
+        completions.parse = patched_parse
+
 
 # ---- Mixin 组装：PrismHarnessAgent = PrismHarnessGuard + ReActAgent ----
 
@@ -92,13 +222,93 @@ def _prompt_to_readable(prompt) -> list:
     return out
 
 
-def _is_internal_hint_message(message: dict) -> bool:
-    """过滤实时上下文里的临时内部提示，避免右侧短暂出现第二个 user。"""
-    content = message.get("content", "")
-    return (
-        message.get("role") == "user"
-        and "内部信息，非用户输入" in content
-    )
+def _safe_get(obj, name, default=None):
+    """AgentScope 的 ChatResponse 等对象对未知属性走 dict 式 __getattr__，
+    会抛 KeyError 而非 AttributeError；这里统一吞掉所有异常，
+    避免单个未知字段拖垮整条模型回复的提取。"""
+    try:
+        return getattr(obj, name, default)
+    except Exception:
+        return default
+
+
+def _agentscope_msg_to_readable(msg) -> dict:
+    """把模型回复（AgentScope ChatResponse / Msg / dict）转成前端可直接渲染的结构。
+
+    与 OpenAIChatFormatter 产出的 OpenAI 格式对齐：role / content(str) / tool_calls[...]，
+    这样 _renderApiMsg 能原样画出来，无需为回复另写一套渲染。
+
+    关键点：模型回复是 ChatResponse，它没有 role 字段（role 恒为 assistant），
+    且其 __getattr__ 对未知属性会抛 KeyError——绝不能用 getattr(msg, "role", ...) 去读。
+    content 是 block 列表（TextBlock / ToolUseBlock / ThinkingBlock），tool_calls
+    可能内嵌在 ToolUseBlock 里，也可能在顶层 tool_calls 字段。"""
+    if isinstance(msg, dict):
+        role = msg.get("role", "assistant")
+        content = msg.get("content")
+        top_tcs = msg.get("tool_calls")
+    else:
+        # ChatResponse：无 role 字段，恒为 assistant；content/tool_calls 用 _safe_get 安全读取
+        role = "assistant"
+        content = _safe_get(msg, "content")
+        top_tcs = _safe_get(msg, "tool_calls")
+
+    text_parts = []
+    tool_calls = []
+
+    def _append_text(t):
+        if t:
+            text_parts.append(str(t))
+
+    def _append_tool(name, args):
+        if not isinstance(args, str):
+            args = json.dumps(args, ensure_ascii=False)
+        tool_calls.append({"function": {"name": name, "arguments": args}})
+
+    def _handle_block(b):
+        if isinstance(b, str):
+            _append_text(b)
+            return
+        if isinstance(b, dict):
+            t = b.get("type")
+            if t == "text":
+                _append_text(b.get("text", ""))
+            elif t == "tool_use":
+                fn = b.get("function", {}) or {}
+                name = fn.get("name") or b.get("name", "")
+                _append_tool(name, b.get("arguments") if b.get("arguments") is not None else b.get("input"))
+            return
+        # AgentScope block 对象（TextBlock / ToolUseBlock）
+        bt = _safe_get(b, "type")
+        if bt == "text":
+            _append_text(_safe_get(b, "text", ""))
+        elif bt == "tool_use":
+            name = _safe_get(b, "name", "")
+            inp = _safe_get(b, "input", None)
+            if inp is None:
+                inp = _safe_get(b, "arguments", None)
+            _append_tool(name, inp)
+
+    if isinstance(content, str):
+        _append_text(content)
+    elif isinstance(content, list):
+        for b in content:
+            _handle_block(b)
+
+    # 兜底：部分 AgentScope 版本把 tool_calls 放在顶层
+    if isinstance(top_tcs, list):
+        for tc in top_tcs:
+            fn = tc.get("function", {}) if isinstance(tc, dict) else _safe_get(tc, "function", {})
+            name = fn.get("name", "") if isinstance(fn, dict) else _safe_get(fn, "name", "")
+            args = fn.get("arguments", "") if isinstance(fn, dict) else _safe_get(fn, "arguments", "")
+            if not isinstance(args, str):
+                args = json.dumps(args, ensure_ascii=False)
+            tool_calls.append({"function": {"name": name, "arguments": args}})
+
+    return {
+        "role": role,
+        "content": "\n".join(p for p in text_parts if p),
+        "tool_calls": tool_calls,
+    }
 
 
 class ModelContextProbe:
@@ -121,13 +331,48 @@ class ModelContextProbe:
 
     async def __call__(self, prompt, **kwargs):
         sink = object.__getattribute__(self, "_probe_sink")
-        emit = sink.get("emit")
-        if emit is not None:
+        emit_ctx = sink.get("emit")
+        if emit_ctx is not None:
             try:
-                await emit(prompt)
+                # 把 **kwargs（含 tools / tool_choice）一并交给展示层（context_view 轮次元数据）。
+                await emit_ctx(prompt, kwargs)
             except Exception:
                 pass  # 展示失败不能影响主流程
-        return await object.__getattribute__(self, "_probe_model")(prompt, **kwargs)
+        result = await object.__getattribute__(self, "_probe_model")(prompt, **kwargs)
+        # 流式（本项目 build_model(stream=True)）：result 是 async generator，逐块 yield 模型输出；
+        # 非流式：result 是完整 Msg。必须原样把 result 返回给上层（上层要迭代/await 它），
+        # 不能 await 它去"拿回复"——await 一个 async generator 只会拿到生成器本身，拿不到文本。
+        # 所以这里用"分流"：一边把每块 yield 给上层（保证流式/推理正常），一边在流结束后
+        # 把最终 ChatResponse 作为"模型回复"emit 出去。
+        if hasattr(result, "__aiter__"):
+            async def teed():
+                last_response = None
+                async for chunk in result:
+                    last_response = chunk
+                    yield chunk
+                # 流结束：把最终聚合出的 ChatResponse 作为"模型回复"emit，
+                # 让右侧上下文面板能原样展示模型这一步到底回了什么。
+                emit_reply = sink.get("emit_model_reply")
+                if emit_reply is not None and last_response is not None:
+                    try:
+                        await emit_reply({
+                            "step": sink.get("step"),
+                            "reply": _agentscope_msg_to_readable(last_response),
+                        })
+                    except Exception:
+                        pass
+            return teed()
+        # 非流式：完整 Msg，直接转换并 emit 回复
+        emit_reply = sink.get("emit_model_reply")
+        if emit_reply is not None:
+            try:
+                await emit_reply({
+                    "step": sink.get("step"),
+                    "reply": _agentscope_msg_to_readable(result),
+                })
+            except Exception:
+                pass
+        return result
 
 
 # ---- Agent 生命周期 ----
@@ -276,6 +521,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
     # ctx_sink 是会话级可变对象，每轮请求把 emit 指到当轮 SSE 流（见下方 streaming）。
     ctx_sink: dict = {}
     probe = ModelContextProbe(model, ctx_sink)
+    _wrap_openai_client(model, ctx_sink)  # 拦截真正发出的请求 payload（含 step/params/messages/tools）
     agent = PrismHarnessAgent(
         name="PrismHarness",
         sys_prompt=system_prompt,
@@ -308,6 +554,7 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             return False
         last_llm_sig = sig
         model = build_model(new_cfg, stream=True)
+        _wrap_openai_client(model, ctx_sink)  # 重建后重新包一层（ctx_sink 会话级，step 计数共享）
         token_counter = build_token_counter(new_cfg)
         probe._probe_model = model
         # 防御性替换：这些属性若不存在则跳过，不阻塞主流程
@@ -418,12 +665,17 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             # 把"本轮真正发送给 LLM 的上下文"灌进右侧光谱面板。
             # ModelContextProbe 每次调 API 前会回调 emit，构造 context_view 事件实时刷新面板，
             # full_messages 用真实 prompt 全量（不截断），一轮内多次调 API 会更新同一个轮块。
-            async def emit_context(prompt):
+            async def emit_context(prompt, kwargs=None):
+                kwargs = kwargs or {}
                 readable = [
                     m
                     for m in _prompt_to_readable(prompt)
-                    if not _is_internal_hint_message(m)
+                    if not _is_internal_hint_msg(m)
                 ]
+                # 模型本轮真实收到的工具定义（OpenAI tools 字段）：
+                # 来自 ReActAgent._reasoning 的 model(prompt, tools=toolkit.get_json_schemas(), ...)
+                tools = kwargs.get("tools")
+                tool_choice = kwargs.get("tool_choice")
                 await q.put({
                     "type": "context_view",
                     "data": {
@@ -434,10 +686,30 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                             {"role": m["role"], "content": m["content"], "chars": len(m["content"])}
                             for m in readable
                         ],
+                        # 新增：把工具 schema 也带进上下文面板，补全"模型看到的全貌"
+                        "tools": tools if isinstance(tools, list) else None,
+                        "tool_choice": tool_choice,
                     },
                     "msg_id": "ctx",
                 })
             ctx_sink["emit"] = emit_context
+
+            async def emit_request_payload(payload):
+                await q.put({
+                    "type": "request_payload",
+                    "data": payload,
+                    "msg_id": "req",
+                })
+
+            async def emit_model_reply(payload):
+                await q.put({
+                    "type": "model_reply",
+                    "data": payload,
+                    "msg_id": "reply",
+                })
+
+            ctx_sink["emit_request_payload"] = emit_request_payload
+            ctx_sink["emit_model_reply"] = emit_model_reply
 
             async def streaming():
                 step = 0
