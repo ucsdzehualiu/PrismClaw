@@ -202,11 +202,26 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .tool-card .tool-body{display:none;padding:10px 12px 12px;font-family:var(--font-mono);font-size:12px;
   color:var(--text-tertiary);border-top:1px solid var(--border-l1);max-height:200px;overflow-y:auto}
 .tool-card.open .tool-body{display:block}
+.tool-card .tool-body.show{display:block;border-top:none;padding-left:12px;padding-right:12px}
 .tool-card .tool-body .result-label{color:var(--success);margin-top:6px;font-weight:600}
 .tool-card.loading .tool-header::after{content:'';display:inline-block;width:100px;height:3px;
   background:linear-gradient(90deg,var(--accent),transparent);animation:shimmer 1.5s infinite;
   border-radius:2px;margin-left:auto}
 @keyframes shimmer{0%{opacity:1}50%{opacity:0.3}100%{opacity:1}}
+
+/* 工具参数键值表 + 头部状态 */
+.tool-card .tool-ic{font-size:12px;opacity:0.85}
+.tool-card .tool-status{margin-left:auto;font-size:11px;font-weight:500;color:var(--text-tertiary)}
+.tool-card.loading .tool-status{color:var(--orange);animation:pulse 1.2s ease-in-out infinite}
+.tool-card .tool-status.tool-status-err{color:var(--danger)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.45}}
+.tool-params{border-collapse:collapse;width:100%;font-family:var(--font-mono);font-size:11.5px;
+  background:rgba(0,0,0,0.18);border-radius:4px;overflow:hidden}
+.tool-params td{padding:3px 8px;border-top:1px solid var(--border-l2);vertical-align:top}
+.tool-params tr:first-child td{border-top:none}
+.tool-params .pk{color:var(--accent);white-space:nowrap;font-weight:600;width:1%}
+.tool-params .pv{color:var(--text-primary);white-space:pre-wrap;word-break:break-word}
+.tool-params .pv-empty{color:var(--text-tertiary);font-family:var(--font-sans);padding:2px 0}
 
 /* ---- HITL confirm ---- */
 .confirm-card{border-left-color:var(--warn)!important;background:var(--warn-soft)!important}
@@ -286,6 +301,11 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .timeline-item .tl-tool{font-size:12.5px;font-weight:600;color:var(--text-primary);font-family:var(--font-mono);margin-top:3px}
 .timeline-item .tl-detail{font-size:11.5px;color:var(--text-tertiary);font-family:var(--font-mono);
   margin-top:3px;max-height:80px;overflow-y:auto}
+/* 工具时间线按轮分隔：轮头 + 分隔线 */
+.round-header{position:relative;font-size:12px;font-weight:700;color:var(--accent);
+  margin:14px 0 10px;padding-left:14px;letter-spacing:0.03em}
+.round-header:first-child{margin-top:0}
+.round-sep{position:relative;height:1px;background:var(--border-l2);margin:10px 0;margin-left:14px}
 
 /* ---- Full Prompt inspector ---- */
 .prompt-blocks{margin-top:4px}
@@ -300,6 +320,8 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .prompt-block .pb-chars{color:var(--text-tertiary);font-family:var(--font-mono);font-size:10px;margin-left:auto}
 .prompt-block .pb-arrow{color:var(--text-tertiary);font-size:10px;transition:transform 0.2s;flex-shrink:0}
 .prompt-block.open .pb-arrow{transform:rotate(90deg)}
+.prompt-block .pb-tools{background:var(--orange-glow,rgba(255,159,85,0.12));color:var(--orange);
+  font-size:10.5px;padding:1px 7px;border-radius:9px;font-weight:600}
 .prompt-block .pb-body{display:none;padding:10px 11px;border-top:1px solid var(--border-l1);
   max-height:340px;overflow:auto}
 .prompt-block.open .pb-body{display:block}
@@ -1164,6 +1186,57 @@ function updateAssistantContent(asstId, content) {
   scrollChat();
 }
 
+// 把 guard 的确认 detail（markdown 文本）解析成结构化的工具名 + 参数展示
+// guard 格式: 🔒 **工具调用需要确认** \n\n **工具:** `name` \n **参数:** `{...}` ...
+function parseConfirmDetail(detail) {
+  const out = { name: '', paramsHTML: '', reason: '' };
+  if (!detail) return out;
+  // 工具名（**工具:** 后面的反引号或纯文本）
+  let m = detail.match(/\*\*工具:?\*\*\s*`?([^`\n]+)`?/);
+  if (m) out.name = m[1].trim();
+  else {
+    m = detail.match(/\*\*工具\*\*:\s*([^\n]+)/);
+    if (m) out.name = m[1].trim();
+  }
+  // 参数（**参数:** 后面的内容，可能是 dict 字面量或 JSON）
+  m = detail.match(/\*\*参数:?\*\*\s*`?([\s\S]*?)`?\s*$/);
+  if (m && m[1].trim()) {
+    const raw = m[1].trim();
+    try {
+      // 尝试解析成 JSON / JS 对象
+      const obj = Function('"use strict";return (' + raw + ')')();
+      out.paramsHTML = toolObjectHTML(obj);
+    } catch (e) {
+      out.paramsHTML = '<pre class="pv" style="margin:0;background:rgba(0,0,0,0.2);padding:6px;border-radius:4px;overflow-x:auto">' + escapeHtml(raw) + '</pre>';
+    }
+  } else {
+    out.paramsHTML = '<div class="pv-empty">（无参数）</div>';
+  }
+  // 其余说明文字（去掉前面已经结构化展示的部分）
+  const tail = detail.replace(/🔒\s*\*\*工具调用需要确认\*\*/, '').trim();
+  out.reason = tail.replace(/\*\*工具:?\*\*.*?$/, '').replace(/\*\*参数:?\*\*[\s\S]*$/, '').trim();
+  return out;
+}
+
+// 对象 → 键值表格 HTML
+function toolObjectHTML(obj) {
+  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
+    const entries = Object.entries(obj);
+    if (entries.length) {
+      let html = '<table class="tool-params">';
+      for (const [k, v] of entries) {
+        let val;
+        if (v === null || v === undefined) val = '';
+        else if (typeof v === 'object') val = JSON.stringify(v, null, 2);
+        else val = String(v);
+        html += '<tr><td class="pk">' + escapeHtml(k) + '</td><td class="pv">' + escapeHtml(val) + '</td></tr>';
+      }
+      return html + '</table>';
+    }
+  }
+  return '<div class="pv-empty">' + escapeHtml(String(obj)) + '</div>';
+}
+
 // guard 通过 status 事件发的确认卡片（可靠，不靠文本匹配）
 function renderConfirmCard(asstId, detail) {
   const div = document.getElementById(asstId);
@@ -1172,9 +1245,13 @@ function renderConfirmCard(asstId, detail) {
   div.querySelectorAll('.confirm-card').forEach(c => c.remove());
   const card = document.createElement('div');
   card.className = 'tool-card confirm-card';
+  const info = parseConfirmDetail(detail);
   card.innerHTML = `
-    <div class="tool-header"><span class="arrow">▶</span> 🔒 需要你的确认</div>
-    <div style="padding:6px 12px;font-size:12px;color:var(--text-dim);white-space:pre-wrap">${escapeHtml(detail)}</div>
+    <div class="tool-header" onclick="this.parentNode.querySelector('.tool-body').classList.toggle('show')">
+      <span class="arrow">▶</span> 🔒 需要你的确认 — <code>${escapeHtml(info.name || '工具')}</code>
+    </div>
+    ${info.reason ? '<div class="tool-body show" style="border-top:none;padding:2px 12px 4px;font-family:var(--font-sans);font-size:12px;color:var(--text-dim)">' + escapeHtml(info.reason) + '</div>' : ''}
+    <div class="tool-body show" style="border-top:none;padding:0 12px 2px">${info.paramsHTML}</div>
     <div class="confirm-actions">
       <button class="btn accent" onclick="sendMagic('/approve')">✓ 允许执行</button>
       <button class="btn" onclick="sendMagic('/approve_all')" style="background:var(--success);color:#fff">⚡ 允许全部</button>
@@ -1371,41 +1448,102 @@ function addToolCard(asstId, tc) {
   const div = document.getElementById(asstId);
   if (!div) return;
   const card = document.createElement('div');
-  card.className = 'tool-card loading';
+  card.className = 'tool-card loading open';
   card.id = 'tc-' + tc.id;
-  const paramStr = JSON.stringify(tc.input, null, 2).substring(0, 300);
   card.innerHTML = `
     <div class="tool-header" onclick="toggleToolCard('${tc.id}')">
-      <span class="tool-state"></span><span class="arrow">▶</span> <code>${escapeHtml(tc.name)}</code>
+      <span class="tool-state"></span><span class="arrow">▶</span>
+      <span class="tool-ic">⚙</span>
+      <code>${escapeHtml(tc.name)}</code>
+      <span class="tool-status">执行中…</span>
     </div>
     <div class="tool-body">
-      <div style="color:var(--text-dim)">参数:</div>
-      <pre style="margin:4px 0;font-size:11px;background:rgba(0,0,0,0.2);padding:6px;border-radius:4px;overflow-x:auto">${escapeHtml(paramStr)}</pre>
+      ${toolParamsHTML(tc)}
       <div class="result-label" id="tc-${tc.id}-result">⏳ 执行中...</div>
     </div>`;
   div.appendChild(card);
   scrollChat();
 }
 
-// 更新工具卡的参数显示（流式后期 input 更完整时覆盖）
+// 把工具参数渲染成读得懂的键值列表（而非一坨 JSON）。
+// 整个输出包在一个 .tool-params-wrap 容器里，方便流式更新时整体原子替换，
+// 避免只插入/叠加碎片导致 "参数" 标签重复堆积。
+function toolParamsHTML(tc) {
+  let input = tc.input;
+  let body = '<div style="color:var(--text-dim);font-family:var(--font-sans);font-size:11px;text-transform:uppercase;letter-spacing:0.04em;margin-bottom:4px">参数</div>';
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const entries = Object.entries(input);
+    if (entries.length) {
+      body += '<table class="tool-params">';
+      for (const [k, v] of entries) {
+        let val;
+        if (v === null || v === undefined) val = '';
+        else if (typeof v === 'object') val = JSON.stringify(v, null, 2);
+        else val = String(v);
+        body += '<tr><td class="pk">' + escapeHtml(k) + '</td>' +
+                '<td class="pv">' + escapeHtml(val) + '</td></tr>';
+      }
+      body += '</table>';
+      return '<div class="tool-params-wrap">' + body + '</div>';
+    }
+  }
+  // 非对象参数（字符串等）或空参数
+  if (input !== undefined && input !== null && input !== '') {
+    body += '<pre style="margin:0;font-size:11px;background:rgba(0,0,0,0.2);padding:6px;border-radius:4px;overflow-x:auto;white-space:pre-wrap">' +
+            escapeHtml(String(input)) + '</pre>';
+  } else {
+    body += '<div class="pv-empty">（无参数）</div>';
+  }
+  return '<div class="tool-params-wrap">' + body + '</div>';
+}
+
+// 更新工具卡的参数显示（流式后期 input 更完整时覆盖）。
+// 只允许有一个 .tool-params-wrap：有就整体替换，没有就作为 body 第一个节点插入。
 function updateToolCardInput(tc) {
   const card = document.getElementById('tc-' + tc.id);
   if (!card) return;
-  const pre = card.querySelector('.tool-body pre');
-  if (pre) {
-    pre.textContent = JSON.stringify(tc.input, null, 2).substring(0, 300);
+  const body = card.querySelector('.tool-body');
+  if (body) {
+    const existing = body.querySelector('.tool-params-wrap');
+    const fresh = document.createElement('div');
+    fresh.innerHTML = toolParamsHTML(tc);
+    const newNode = fresh.firstChild;
+    if (existing) {
+      existing.replaceWith(newNode);
+    } else {
+      body.insertBefore(newNode, body.firstChild);
+    }
   }
   // 更新时间线详情
   const tlDetail = document.getElementById('tl-' + tc.id + '-detail');
   if (tlDetail) {
-    tlDetail.textContent = '参数: ' + JSON.stringify(tc.input || {}).substring(0, 120);
+    tlDetail.textContent = formatParamsInline(tc.input);
   }
+}
+
+// 单行内联参数摘要（时间线用）
+function formatParamsInline(input) {
+  if (input && typeof input === 'object' && !Array.isArray(input)) {
+    const parts = Object.entries(input).map(([k, v]) => {
+      let s = (typeof v === 'object') ? JSON.stringify(v) : String(v);
+      return k + '=' + (s.length > 60 ? s.slice(0, 57) + '…' : s);
+    });
+    return '参数: ' + parts.join(', ');
+  }
+  return '参数: ' + (input === undefined || input === null ? '' : String(input));
 }
 
 function updateToolCard(tc) {
   const card = document.getElementById('tc-' + tc.id);
   if (!card) return;
   card.classList.remove('loading');
+  // 头部状态：执行成功/失败
+  const statusEl = card.querySelector('.tool-status');
+  if (statusEl) {
+    const failed = /(?:error|错误|失败|exception|两条|Traceback|Cannot|denied|reject)/i.test(String(tc.output || ''));
+    statusEl.textContent = failed ? '完成（有异常）' : '完成 ✓';
+    statusEl.classList.toggle('tool-status-err', failed);
+  }
   const resultEl = document.getElementById('tc-' + tc.id + '-result');
   if (resultEl) {
     let output = tc.output;
@@ -1435,11 +1573,13 @@ function toggleToolCard(id) {
 function updateContextView(data) {
   const d = data || {};
   // 新的一轮：重置元信息与会话级步骤轨迹，避免上一轮的 token/system 残留到本轮。
+  // 同时在右侧“工具轨迹”时间线里插入一轮分隔头，让工具调用按轮清晰分组。
   const round = d.round || modelContextRound;
   if (round && round !== modelContextRound) {
     modelContextRound = round;
     modelContextMeta = { token_stats: null, full_system: null, user_input: null };
     modelSteps.clear();
+    startTimelineRound(round);
   }
   if (d.token_stats) modelContextMeta.token_stats = d.token_stats;
   if (d.full_system) modelContextMeta.full_system = d.full_system;
@@ -1475,29 +1615,65 @@ function _renderApiMsg(m, i) {
     text = String(content);
   }
   const chars = (typeof text === 'string') ? text.length : 0;
-  // assistant 的 tool_calls
+  // assistant 的 tool_calls：每个调用渲染成独立的"工具调用"卡片，参数键值清晰可见
   let extra = '';
+  let toolCallsHtml = '';
   if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
-    const calls = m.tool_calls.map(t => {
+    const cards = m.tool_calls.map(t => {
       const fn = t.function || {};
-      const args = (typeof fn.arguments === 'string') ? fn.arguments
-        : JSON.stringify(fn.arguments || {});
-      return `→ ${fn.name || ''}(${args})`;
-    }).join('\n');
-    text = (text ? text + '\n' : '') + calls;
+      return toolCallCardHTML(fn.name || '', fn.arguments || {}, t.id);
+    }).join('');
+    toolCallsHtml = `<div class="tool-body show" style="border-top:none;padding-top:6px">${cards}</div>`;
   }
   if (m.tool_call_id) {
     extra = `<span class="pb-chars">call_id: ${escapeHtml(m.tool_call_id)}</span>`;
   }
-  return `<div class="prompt-block role-${role}">
+  // 有工具调用的消息自动展开，让"⚙ 工具名 + 参数卡"直接可见，不用点开
+  const hasTools = Array.isArray(m.tool_calls) && m.tool_calls.length;
+  const toolBadge = hasTools ? `<span class="pb-tools">⚙ ${m.tool_calls.length} 个工具调用</span>` : '';
+  const showBody = (toolCallsHtml || text) ? `<div class="pb-body">${toolCallsHtml}${text ? '<pre class="pb-pre">' + escapeHtml(text) + '</pre>' : ''}</div>` : '';
+  return `<div class="prompt-block role-${role}${hasTools ? ' open' : ''}">
     <div class="pb-header" onclick="this.parentElement.classList.toggle('open')">
       <span class="pb-idx">#${i}</span>
       <span class="role-tag">${escapeHtml(tag)}</span>
+      ${toolBadge}
       <span class="pb-chars">${chars.toLocaleString()} 字</span>
       ${extra}
       <span class="pb-arrow">▶</span>
     </div>
-    <div class="pb-body"><pre>${escapeHtml(text || '(空)')}</pre></div>
+    ${showBody}
+  </div>`;
+}
+
+// 单个工具调用 → 结构化卡片（工具名 + 参数键值表），不用一行 JSON 糊过去
+function toolCallCardHTML(name, args, callId) {
+  // OpenAI 格式 arguments 可能是 JSON 字符串，先尝试解析成对象
+  if (typeof args === 'string' && args.trim().startsWith('{')) {
+    try { args = JSON.parse(args); } catch (e) { /* 解析失败就当纯文本 */ }
+  }
+  let paramsHtml;
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    const entries = Object.entries(args);
+    const rows = entries.length
+      ? entries.map(([k, v]) => {
+          let val;
+          if (v === null || v === undefined) val = '';
+          else if (typeof v === 'object') val = JSON.stringify(v, null, 2);
+          else val = String(v);
+          return `<tr><td class="pk">${escapeHtml(k)}</td><td class="pv">${escapeHtml(val)}</td></tr>`;
+        }).join('')
+      : '<tr><td colspan="2" class="pv-empty">（无参数）</td></tr>';
+    paramsHtml = `<table class="tool-params">${rows}</table>`;
+  } else if (args !== undefined && args !== null && args !== '') {
+    paramsHtml = `<pre class="pb-pre" style="margin:0;background:rgba(0,0,0,0.2);padding:6px;border-radius:4px;overflow-x:auto">${escapeHtml(String(args))}</pre>`;
+  } else {
+    paramsHtml = '<div class="pv-empty">（无参数）</div>';
+  }
+  return `<div class="tool-card console-tool" style="margin:4px 0">
+    <div class="tool-header" style="cursor:default"><span class="arrow">▶</span> <span class="tool-ic">⚙</span> <code>${escapeHtml(name)}</code>
+      ${callId ? `<span class="tool-status" style="margin-left:2px">${escapeHtml(String(callId).slice(0, 8))}</span>` : ''}
+    </div>
+    <div class="tool-body show">${paramsHtml}</div>
   </div>`;
 }
 
@@ -1633,10 +1809,35 @@ function toggleAllPromptBlocks(btn) {
 
 // ====== Tool Timeline ======
 let toolStepCounter = 0;
+// 当前时间线里展示到第几轮（用于在工具时间线里按轮插入分隔头）
+let timelineRound = 0;
 
 function clearToolTimeline() {
   toolsContent.innerHTML = '<div class="tool-timeline" id="toolTimeline"></div>';
   toolStepCounter = 0;
+  timelineRound = 0;
+}
+
+// 在工具时间线里插入“第 N 轮”分隔头，让工具调用按轮清晰分组。
+// 同一轮重复调用会被守卫跳过；跨轮时在两条之间加一条分隔线。
+function startTimelineRound(round) {
+  if (!round || round === timelineRound) return;
+  timelineRound = round;
+  let timeline = document.getElementById('toolTimeline');
+  if (!timeline) {
+    toolsContent.innerHTML = '<div class="tool-timeline" id="toolTimeline"></div>';
+    timeline = document.getElementById('toolTimeline');
+  }
+  if (timeline.childElementCount > 0) {
+    const sep = document.createElement('div');
+    sep.className = 'round-sep';
+    timeline.appendChild(sep);
+  }
+  const h = document.createElement('div');
+  h.className = 'round-header';
+  h.textContent = '🔄 第 ' + round + ' 轮';
+  timeline.appendChild(h);
+  toolsContent.scrollTop = toolsContent.scrollHeight;
 }
 
 function updateTimeline(tc) {
@@ -1908,7 +2109,7 @@ function clearCurrentUI() {
   // 重置运行时状态
   messages = []; toolCalls = []; messageBlocks = new Map();
   messageIdOrder = []; lastAsstId = ''; lastAsstMsg = null;
-  currentTraceUserText = ''; toolStepCounter = 0;
+  currentTraceUserText = ''; toolStepCounter = 0; timelineRound = 0;
   // 重置上下文轨迹（单一面板）状态，避免上一个会话的步骤残留
   modelContextRound = 0;
   modelSteps.clear();
@@ -2269,7 +2470,7 @@ function renderProviderTabs() {
     b.className = 'provider-tab' + (n === settingsActiveProvider ? ' active' : '');
     b.textContent = n + (n === settingsState.llm.provider ? ' ●' : '');
     b.title = n + (n === settingsState.llm.provider ? '（当前使用）' : '');
-    b.onclick = () => { commitActiveProviderForm(); settingsActiveProvider = n; renderProviderTabs(); renderActiveProviderForm(); };
+    b.onclick = () => { commitActiveProviderForm(); settingsActiveProvider = n; settingsState.llm.provider = n; renderProviderTabs(); renderActiveProviderForm(); renderCurProviderSelect(); }; // 点 provider tab 即设为当前使用，避免"编辑了 dsv4 却仍用 qwen"
     tabs.appendChild(b);
   });
   const add = document.createElement('button');

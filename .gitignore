@@ -19,3 +19,8 @@ smoke_pid.txt
 .idea/
 .clawhub/
 0.40.0
+
+# Runtime logs
+server.*.log
+server.err.log
+server.out.log

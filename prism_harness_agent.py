@@ -200,6 +200,8 @@ def _prompt_to_readable(prompt) -> list:
     """把将要发给 LLM 的 prompt（list[dict]，OpenAI 格式）整理成可展示结构。
 
     不做任何过滤/改写，只把 content 块与 tool_calls 转成可读文本——上下文是怎么样就怎么样。
+    同时把结构化的 tool_calls（name + arguments）原样带出，前端据此渲染成"工具调用参数"卡片，
+    而不是只扁平成一行文本糊在 <pre> 里。
     """
     if not isinstance(prompt, list):
         return []
@@ -211,14 +213,19 @@ def _prompt_to_readable(prompt) -> list:
         text = _prompt_content_to_text(m.get("content"))
         # OpenAI 函数调用：assistant 消息 content=null，工具调用放在 tool_calls 字段
         tcs = m.get("tool_calls")
+        structured_tcs = None
         if tcs:
+            structured_tcs = []
             parts = []
             for tc in tcs:
                 fn = tc.get("function", {})
-                parts.append(f"[工具调用] {fn.get('name', '')} 参数: {fn.get('arguments', '')}")
+                name = fn.get("name", "")
+                args = fn.get("arguments", "")
+                structured_tcs.append({"function": {"name": name, "arguments": args}})
+                parts.append(f"[工具调用] {name} 参数: {args}")
             join = "\n\n".join(parts)
             text = f"{text}\n\n{join}" if text else join
-        out.append({"role": role, "content": text})
+        out.append({"role": role, "content": text, "tool_calls": structured_tcs})
     return out
 
 

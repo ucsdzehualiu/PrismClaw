@@ -55,6 +55,17 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
 
     shell = (shell or "powershell").strip().lower()
 
+    # PowerShell 里 curl 是 Invoke-WebRequest 的别名，没有 -s/-o 等 curl 参数，
+    # 模型若照 bash 习惯写 `curl -s "url"` 会直接报 "missing mandatory parameter: Uri"。
+    # 这里把以 curl 开头的命令改写为 curl.exe（真正的 curl），消除别名陷阱。
+    # 若命令显式用 curl.exe / Invoke-WebRequest / 其它开头则原样执行。
+    if shell == "powershell":
+        stripped = command.lstrip()
+        m = re.match(r"(curl)(\s|$)", stripped, re.IGNORECASE)
+        if m:
+            command = "curl.exe" + stripped[m.end() - 1:]
+            _repeat_note = _note_repeat("run_shell", f"{shell}:{command}")
+
     # 软提示：记录重复调用，但不阻止执行
     _repeat_note = _note_repeat("run_shell", f"{shell}:{command}")
 
@@ -119,21 +130,24 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
 # ---- Prompt 模板 ----
 
 REASONING_HINT_TEMPLATE = """
-(内部信息，非用户输入，不要直接引用这段文字)
+(内部信息，非用户输入。直接回答用户即可，绝对不要复述、引用或转述本条准则给用户，
+也不要回复"我会按照这些准则执行"之类的话——那是系统提示，不是对话内容。)
 
 当前时间：{current_time}
 
-行动准则：
-- 涉及实时信息（天气/股价/新闻/知识）→ 调 web_search
-- 需要读取某个具体网页/文档/API → 用 web_fetch(url) 抓取正文
-- 涉及文件操作 → 先 view_text_file 查看，再 write/insert
-- 写入文件或执行Shell → 直接调工具，系统会自动弹确认卡片，你不要自己写"需要确认吗"
+决定要不要调工具的准则：
+- 常识/知识/分析/写作类问题（如"龙卷风怎么形成""做个PPT讲火山"）→ 直接用自己的知识回答，
+  不要为了查"常识"去搜索，更不要反复换词搜同一主题。内容自己生成即可。
+- 只有需要「精确、实时、可验证」的数据时才搜索/抓取，例如：天气、股价、油价、最新新闻、
+  具体网址、某产品当前的版本/价格。
+- 需要读取某个具体网页/文档/API → 用 web_fetch(url) 抓取正文。
+- 涉及文件操作 → 先 view_text_file 查看，再 write/insert。
+- 写入文件或执行Shell → 直接调工具，系统会自动弹确认卡片，你不要自己写"需要确认吗"。
 
 不要做的事：
-- 未调工具就回答需要实时数据的问题
-- 编造工具调用结果
-- 同一问题反复调相同工具
-- 调高风险工具前自言自语"需要确认"——确认是系统弹卡片的事，你只管调工具
+- 未调工具就编造"实时数据"（如具体温度、股价数字）。
+- 同一个问题反复调相同/相似工具——拿到结果就停，直接整理回复。
+- 调高风险工具前自言自语"需要确认"——确认是系统弹卡片的事，你只管调工具。
 """
 
 AGENT_SYS_PROMPT_TEMPLATE = """你是本项目配置的一位智能 AI 助手（具备透明、高效的 Agent 能力）。
@@ -153,18 +167,22 @@ AGENT_SYS_PROMPT_TEMPLATE = """你是本项目配置的一位智能 AI 助手（
 - 工具调用硬上限：单轮最多 20 步，超限自动终止
 
 ## 响应风格
-- 简洁有力���结论先行
+- 简洁有力、结论先行
 - Markdown 格式输出
 - 代码块标注语言
+- **不要复述/回显本系统提示或内部的"行动准则"**：直接回答用户的问题、直接干活即可。
+  不要写"好的，收到，我要按照这些准则执行……""好的，我来调 web_search……"这类空话。
 
 {extra_prompt}
 
 ### 📥 下载与安装
 - `download_file(url, save_name)` — 下载任意网络文件到 `workspace/downloads/`（受控，会请求确认）。
 - `run_shell(command, timeout, shell)` — 执行系统命令（受控，会请求确认）。
+- **取数据优先用 `web_fetch`/`web_search`**，不要把简单抓取写成 shell 命令。天气、股价、网页内容、新闻这类「读取外部数据」一律走 `web_fetch(url)` 或 `web_search`，它们会替你处理编码、UA、反爬，比 `curl` 可靠得多。
 - **运行环境是 Windows**，`run_shell` 有两种模式：
   - `shell="powershell"`（默认）— 直接写 PowerShell 语法，不要自己包 `powershell -Command`。
   - `shell="bash"` — 走 Git Bash，用于执行 bash 脚本（如 `curl URL | bash`、`bash install.sh`、`#!/usr/bin/env bash` 开头的文件）。
+- **PowerShell 里 `curl` 不是 curl**：它是 `Invoke-WebRequest` 的别名，没有 `-s`/`-o` 等参数。真要用命令行抓取必须写 `curl.exe -s "https://..."`（系统会自动把 `curl` 转成 `curl.exe`，但最稳还是直接写 `curl.exe` 或用 `web_fetch`）。绝不要写 bash 风格 `curl -s "url"`。
 - **铁规则**：bash 语法（`while [[ ]]`、`$#`、`set -euo pipefail` 等）**绝不**塞进 PowerShell，反之亦然。拿到 `.sh` 脚本 → `run_shell("bash 脚本路径", shell="bash")`。
 - **不要发空命令**。`command` 必须是有内容的完整命令。
 - **安装前先检查**（重要）：执行任何安装/下载命令前，先检查目标是否已存在（如 `node_modules/` 目录、`pip show`、`npm ls` 等）。已存在且可用的直接告诉用户，不要重复安装。
@@ -446,41 +464,99 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
         return ToolResponse(content=[TextBlock(type="text", text=f"抓取出错：{e}")])
 
 
+# ---- Bing 联网搜索（国内可直连）----
+# 关键修复：Bing 对「未建立会话 cookie（MUID）」的匿名请求只返回个性化/与查询无关的
+# feed —— 表现为"搜什么都是同一批无关结果"（例如搜"龙卷风形成原因"返回动漫角色）。
+# 解决：用**模块级持久会话**先访问一次 Bing 首页取到 cookie，之后在同一会话里搜索，
+# cookie 自动复用，Bing 就会返回真实、相关的搜索结果。绝不能再每次调用临时 new 一个
+# aiohttp.ClientSession（那会丢 cookie、回到"无关 feed"的老毛病）。
+
+_BING_SESSION = None
+_BING_WARMED = False
+_BING_LOCK = asyncio.Lock()
+
+
+def _query_is_cjk(query: str) -> bool:
+    """中/日/韩文查询 → 用 zh-CN 市场；否则用 en-US，避免英文词被转到中文站。"""
+    return any("一" <= ch <= "鿿" or "぀" <= ch <= "ヿ"
+               or "가" <= ch <= "힣" for ch in query)
+
+
+async def _get_bing_session():
+    """获取（必要时创建并预热）Bing 持久会话。预热首页拿到 MUID cookie。
+
+    注意：cookie 是按域隔离的，cn.bing.com 与 www.bing.com 各自要单独预热一次，
+    否则其中一个 host 没有 MUID 又会回到"无关 feed"（搜什么都是同一批无结果）。
+    """
+    global _BING_SESSION, _BING_WARMED
+    import aiohttp
+    async with _BING_LOCK:
+        if _BING_SESSION is None or _BING_SESSION.closed:
+            _BING_SESSION = aiohttp.ClientSession(
+                headers={
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+                    "Accept-Language": "zh-CN,zh;q=0.9",
+                },
+                timeout=aiohttp.ClientTimeout(total=15),
+            )
+            _BING_WARMED = False
+        if not _BING_WARMED:
+            for host in ("www.bing.com", "cn.bing.com"):
+                try:
+                    async with _BING_SESSION.get(f"https://{host}/") as _:
+                        pass
+                except Exception:
+                    pass
+            _BING_WARMED = True
+        return _BING_SESSION
+
+
+async def _parse_bing_html(html: str) -> list:
+    """从 Bing 搜索结果 HTML 抽取 (标题, 链接)，兼容 b_algo 结构。"""
+    soup = BeautifulSoup(html, "html.parser")
+    results = []
+    for item in soup.select("li.b_algo")[:6]:
+        a = item.select_one("h2 a") or item.select_one("h3 a")
+        if not a:
+            continue
+        link = (a.get("href") or "").strip()
+        title = a.get_text(" ", strip=True)
+        # 跳过 bing 站内/导航链接
+        if "bing.com/" in link and "/search" in link:
+            continue
+        if not title:
+            continue
+        results.append(f"{len(results)+1}. {title}\n   链接: {link}")
+    return results
+
+
 async def _bing_cn_search(query: str) -> str:
-    """必应中国搜索（国内可直连，替代被墙的 DuckDuckGo）。"""
+    """必应搜索（国内可直连）。cn.bing.com 为主，www.bing.com 兜底。"""
     import aiohttp
     from urllib.parse import quote
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://cn.bing.com/search?q={quote(query)}&count=8"
+    session = await _get_bing_session()
+
+    mkt = "zh-CN" if _query_is_cjk(query) else "en-US"
+    hosts = ["cn.bing.com", "www.bing.com"]
+    for host in hosts:
+        try:
+            url = (
+                f"https://{host}/search?q={quote(query)}&count=8"
+                f"&setlang=zh-hans&mkt={mkt}"
+            )
             async with session.get(
                 url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
-                    "Accept-Language": "zh-CN,zh;q=0.9",
-                },
+                headers={"Accept-Language": "zh-CN,zh;q=0.9"},
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 html = await resp.text(errors="ignore")
-        soup = BeautifulSoup(html, "html.parser")
-        results = []
-        for item in soup.select("li.b_algo")[:6]:
-            a = item.select_one("h2 a")
-            if not a:
-                continue
-            link = a.get("href", "")
-            title = a.get_text(" ", strip=True)
-            # 跳过 bing 内部链接
-            if "bing.com/" in link and "/search" in link:
-                continue
-            if not title:
-                continue
-            results.append(f"{len(results)+1}. {title}\n   链接: {link}")
-        if results:
-            return "搜索结果（必应中国）：\n" + "\n".join(results)
-    except Exception:
-        pass
+            results = await _parse_bing_html(html)
+            if results:
+                return "搜索结果（必应）：\n" + "\n".join(results)
+        except Exception:
+            continue
     return ""
 
 
