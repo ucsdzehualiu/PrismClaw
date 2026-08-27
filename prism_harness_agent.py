@@ -702,6 +702,8 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
             ctx_sink["emit"] = emit_context
 
             async def emit_request_payload(payload):
+                # 原始请求负载无损落盘（模型每一步实际收到的完整入参，含结构化 tool_calls / tool 结果）
+                viz.record_request_payload(payload)
                 await q.put({
                     "type": "request_payload",
                     "data": payload,

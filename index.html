@@ -1696,6 +1696,8 @@ function updateModelContext(data, eventType) {
     rec.step = s;
     rec.params = data.params || {};
     rec.messages = data.messages || [];
+    rec.tools = data.tools || [];
+    rec.raw = data; // 完整原始 payload（含 raw_keys），供"原始 JSON"视图逐字还原
     if (data.tools && data.tools.length) modelContextTools = data.tools;
     modelSteps.set(s, rec);
   } else if (eventType === 'model_reply') {
@@ -1777,23 +1779,66 @@ function renderModelSteps() {
     });
     h += `</div></div>`;
   }
+  // 请求轨迹：默认全部展开，让"渐进式加载"（每步消息条数递增）一眼可见；顶部可一键折叠。
+  h += `<div style="display:flex;align-items:center;justify-content:space-between;margin:6px 2px 8px">
+    <div class="section-title" style="margin:0">模型请求轨迹（共 ${steps.length} 步 · 渐进式加载）</div>
+    <button onclick="toggleAllSteps(this)" data-expand="true" style="cursor:pointer;border:1px solid var(--border);background:var(--bg-card);color:var(--text-bright);border-radius:var(--radius-sm);padding:4px 10px;font-size:12px">全部折叠 ▴</button>
+  </div>`;
+  let prevCount = 0;
   steps.forEach((rec, idx) => {
-    const isLast = idx === steps.length - 1;
+    const count = (rec.messages || []).length;
+    const delta = count - prevCount;
+    prevCount = count;
     let body = _renderParamsBar(rec.params);
-    body += `<div class="section-title">模型输入消息（${rec.messages ? rec.messages.length : 0} 条）</div>`;
+    body += `<div class="section-title">模型输入消息（${count} 条${delta > 0 ? ` · 本步新增 +${delta}` : ''}）</div>`;
     body += `<div class="prompt-blocks">${(rec.messages || []).map((m, i) => _renderApiMsg(m, i)).join('')}</div>`;
     body += rec.reply
       ? `<div class="section-title">模型回复</div><div class="prompt-blocks">${_renderApiMsg(rec.reply, 0)}</div>`
       : `<div style="font-size:12px;color:var(--text-dim);padding:4px 2px">（等待模型回复…）</div>`;
+    // 原始 JSON：模型实际收到的完整请求逐字保留，不扁平化、不丢 tool_calls / tool 结果
+    const rawObj = {
+      step: rec.step,
+      params: rec.params || {},
+      messages: rec.messages || [],
+      tools: rec.tools || modelContextTools || [],
+    };
+    const rawJson = JSON.stringify(rawObj, null, 2);
+    body += `<details class="raw-json" style="margin-top:10px;border-top:1px dashed var(--border);padding-top:8px">
+      <summary style="cursor:pointer;font-size:12px;color:var(--accent);user-select:none">📄 原始 JSON（模型实际收到的完整请求）</summary>
+      <pre style="white-space:pre-wrap;word-break:break-word;font-size:11px;line-height:1.5;max-height:420px;overflow:auto;background:var(--bg-input);padding:10px;border-radius:var(--radius-sm);margin-top:6px">${escapeHtml(rawJson)}</pre>
+    </details>`;
     h += `<div class="context-step" style="border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden">
-      <div class="step-header" style="padding:8px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text-bright);cursor:pointer;display:flex;justify-content:space-between" onclick="const b=this.parentElement.querySelector('.step-body'); b.style.display = b.style.display==='block'?'none':'block'">
-        <span>第 ${rec.step} 步${isLast ? ' · 最新' : ''}</span>
-        <span>${isLast ? '▼' : '▶'}</span>
+      <div class="step-header" style="padding:8px 12px;background:var(--bg-card);border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text-bright);cursor:pointer;display:flex;justify-content:space-between;align-items:center" onclick="toggleStep(this)">
+        <span>第 ${rec.step} 步<span style="color:var(--text-dim);font-weight:400;font-size:11px"> · 输入 ${count} 条${delta > 0 ? ` · <span style="color:var(--accent)">+${delta} 新增</span>` : ''}${idx === steps.length - 1 ? ' · 最新' : ''}</span></span>
+        <span class="step-arrow">▼</span>
       </div>
-      <div class="step-body" style="padding:10px;display:${isLast ? 'block' : 'none'}">${body}</div>
+      <div class="step-body" style="padding:10px;display:block">${body}</div>
     </div>`;
   });
   stepsDiv.innerHTML = h;
+}
+
+function toggleStep(header) {
+  const step = header.parentElement;
+  const body = step.querySelector('.step-body');
+  const arrow = header.querySelector('.step-arrow');
+  const open = body.style.display !== 'block';
+  body.style.display = open ? 'block' : 'none';
+  if (arrow) arrow.textContent = open ? '▼' : '▶';
+}
+
+function toggleAllSteps(btn) {
+  const stepsDiv = document.getElementById('contextSteps');
+  if (!stepsDiv) return;
+  const expand = btn.dataset.expand !== 'true';
+  stepsDiv.querySelectorAll('.context-step').forEach(st => {
+    const body = st.querySelector('.step-body');
+    const arrow = st.querySelector('.step-arrow');
+    if (body) body.style.display = expand ? 'block' : 'none';
+    if (arrow) arrow.textContent = expand ? '▼' : '▶';
+  });
+  btn.dataset.expand = expand ? 'true' : 'false';
+  btn.textContent = expand ? '全部折叠 ▴' : '全部展开 ▾';
 }
 
 // 完整 Prompt 检视器：全部展开 / 折叠

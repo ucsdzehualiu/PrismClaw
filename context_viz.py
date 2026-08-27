@@ -87,6 +87,8 @@ class RoundContext:
     # 完整 Prompt：模型本轮实际看到的全部 messages（含 system 全文 + 历史）
     full_system: str = ""
     full_messages: List[Dict[str, Any]] = field(default_factory=list)
+    # 原始请求负载：每一步 OpenAI chat.completions 的完整入参（含结构化 tool_calls / tool 结果）
+    request_payloads: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class ContextViz:
@@ -162,6 +164,14 @@ class ContextViz:
     def set_llm_output(self, text: str):
         """记录 LLM 输出。"""
         self._current.llm_output = text
+
+    def record_request_payload(self, payload: Dict[str, Any]):
+        """记录一步原始请求负载（模型实际收到的完整 chat.completions 入参）。
+
+        保持原始结构（messages 含结构化 tool_calls / tool 结果），不做任何扁平化，
+        保证透明化记录无损。
+        """
+        self._current.request_payloads.append(payload)
 
     # ---- 内部方法 ----
 
@@ -339,7 +349,11 @@ class ContextViz:
         # JSON 快照
         jpath = os.path.join(self.session_dir, "snapshots", f"round_{c.round_num:03d}.json")
         with open(jpath, "w", encoding="utf-8") as f:
-            json.dump(self.to_event(), f, ensure_ascii=False, indent=2)
+            snapshot = self.to_event()
+            # 无损补充：每一步模型实际收到的原始请求负载（含结构化 tool_calls / tool 结果），
+            # 不扁平化、不截断。仅落盘，不进 SSE（前端已按步收到，避免重复灌流）。
+            snapshot["request_payloads"] = c.request_payloads
+            json.dump(snapshot, f, ensure_ascii=False, indent=2)
 
         # Markdown 日志
         md = self._render_markdown()
