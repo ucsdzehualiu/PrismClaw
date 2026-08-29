@@ -976,16 +976,21 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
         agent_skill_template="- name: {name}  dir: {dir}  desc: {description}",
     )
 
-    # 注册技能（L1 元数据）
-    skills_dir = os.path.join(workspace_dir, "skills")
-    if os.path.isdir(skills_dir):
-        for skill_name in os.listdir(skills_dir):
-            skill_path = os.path.join(skills_dir, skill_name)
+    # 注册技能（L1 元数据）——先 workspace（用户自定义），再仓库根 skills（共享技能）
+    # 同名时 workspace 优先（覆盖仓库级）
+    def _register_skills_from(dir_path):
+        if not os.path.isdir(dir_path):
+            return
+        for skill_name in os.listdir(dir_path):
+            skill_path = os.path.join(dir_path, skill_name)
             if os.path.isdir(skill_path):
                 try:
                     toolkit.register_agent_skill(skill_path)
                 except Exception:
                     pass
+
+    _register_skills_from(os.path.join(workspace_dir, "skills"))
+    _register_skills_from("skills")
 
     # 注册内置工具
     if FLAGS.get("enable_view_text_file", True):
