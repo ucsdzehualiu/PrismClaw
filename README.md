@@ -12,6 +12,7 @@
 - **多轮上下文真实累积**：单会话复用同一 Agent 实例，多轮对话上下文持续累积。
 - **人格系统**：通过 `workspace/` 下的 AGENTS / SOUL / USER / IDENTITY 文件定制 Agent 人格，可在界面读取与更新。
 - **会话透明日志**：每轮生成可读 Markdown + 结构化 JSON 快照，落盘到 `session_logs/`。
+- **团队圆桌编排（多智能体）**：一个 lead 把任务分发给多名带独立人格/提示词的成员并行分析，再汇总成最终决策报告。支持 `/team <团队名> <任务>` 魔法命令触发，或界面「🎭 团队」一键运行。内置「投资大师圆桌」（19 位大师 + 风控 + 决策）和「投资圆桌-轻量版」（5 位）两套团队配置，结果自动落盘到 `session_logs/<sid>/teams/run_<时间>/`。
 
 ## 快速开始
 
@@ -50,20 +51,24 @@ python server.py
 
 ```
 浏览器 (index.html) ──SSE──► FastAPI 服务 (server.py)
-                                   │
-                                   ▼
-                          agent_runner() 每会话一个后台循环
-                          (prism_harness_agent.py)
-                            ├─ PrismHarnessAgent
-                            │   = PrismHarnessGuardMixin + ReActAgent (AgentScope)
-                            │     ├─ _reasoning (注入提示)
-                            │     └─ _acting  (HITL 拦截)
-                            │        (prism_harness_guard.py)
-                            ├─ build_toolkit() 工具包 (tools.py)
-                            └─ ContextViz 上下文快照引擎 (context_viz.py)
-                                   │              │              │
-                              Session 管理    config.yaml     workspace/
-                              (session.py)   model_config.py  (人格/技能)
+                                           │
+                                           ▼
+                              agent_runner() 每会话一个后台循环
+                              (prism_harness_agent.py)
+                                ├─ PrismHarnessAgent
+                                │   = PrismHarnessGuardMixin + ReActAgent (AgentScope)
+                                │     ├─ _reasoning (注入提示)
+                                │     └─ _acting  (HITL 拦截)
+                                │        (prism_harness_guard.py)
+                                ├─ build_toolkit() 工具包 (tools.py)
+                                ├─ run_team_stream() 团队圆桌编排 (team.py)
+                                │   ├─ 成员并行分析（精简 ReActAgent，无 HITL）
+                                │   ├─ 风控 stage（risk-manager）
+                                │   └─ 决策 stage（portfolio-manager）
+                                └─ ContextViz 上下文快照引擎 (context_viz.py)
+                                       │              │              │
+                                  Session 管理    config.yaml     workspace/
+                                  (session.py)   model_config.py  (人格/技能/团队)
 ```
 
 **一轮对话数据流**：
@@ -92,6 +97,7 @@ python server.py
 - `session.py` — 会话管理（`Session` / `SessionManager`），请求队列、HITL 确认队列、超时回收。
 - `server.py` — FastAPI 服务，提供 Web 界面与 SSE 流式对话接口。
 - `index.html` — Web 界面（三栏：对话 / 上下文光谱 / 工具时间线）。
+- `team.py` — 团队圆桌编排（`run_team_stream`），成员并行分析 + 风控 + 决策三阶段，含打断重试与增量落盘。
 
 ### 工作区
 - `workspace/` — Agent 人格文件（AGENTS / SOUL / USER / IDENTITY）与技能目录（skills/）。
@@ -125,12 +131,16 @@ python server.py
 | GET | `/stop?session_id=&request_id=` | 打断当前生成 |
 | GET | `/get_personas` | 读 AGENTS / SOUL / USER |
 | POST | `/update_persona` | `{"target":"soul","content":"..."}` 改人格文件 |
+| GET | `/api/teams` | 列出所有已保存团队（slug / name / 成员数）
+| GET | `/api/teams/{slug}` | 读取指定团队 JSON 配置
+| POST | `/api/teams/{slug}` | 创建/更新团队（body 为团队 JSON）
+| DELETE | `/api/teams/{slug}` | 删除团队
 
-**SSE 事件类型**：`text` / `tool_use` / `tool_result` / `status`（thinking / acting / confirm / heartbeat / done / error / max_iters）/ `context_view` / `cancel` / `error`。
+**SSE 事件类型**：`text` / `tool_use` / `tool_result` / `status`（thinking / acting / confirm / heartbeat / done / error / max_iters）/ `context_view` / `cancel` / `error` / `team`（阶段进度 + 成员摘要 + 报告卡片）。
 
 ## 已知限制 / 路线图
 
-- `conf.py` 中的 `enable_cron` / `enable_subagent` / `enable_sandbox` 为预留开关，尚未实现对应工具。
+- `conf.py` 中 `enable_cron` 为预留开关；`enable_subagent` / `enable_sandbox` 已实现（subagent 工具 / sandbox 模式）；`enable_team` 已实现（团队圆桌编排）。
 - 上下文压缩（`context.compress_threshold`）目前仅做统计展示，未真正裁剪历史。
 - RAG / MCP / 长期记忆 / tracing 等高级能力尚未接入，待后续扩展。
 

@@ -18,6 +18,10 @@ agent:
   max_iters: 30
   parallel_tool_calls: false
   console_output: false
+  # 团队/圆桌编排调优
+  roundtable_timeout: 3600   # 整轮圆桌(19位并行+风控+决策)总预算(秒)；完整版需给足
+  team_max_concurrent: 4     # 并行成员上限（共用远端端点时调小可降打断率）
+  team_retries: 3            # 成员被打断时的重建重试次数
 
 context:
   token_budget: 320000
