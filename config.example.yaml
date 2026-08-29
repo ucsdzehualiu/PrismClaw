@@ -24,7 +24,7 @@ agent:
   team_retries: 3            # 成员被打断时的重建重试次数
 
 context:
-  token_budget: 320000
+  token_budget: 420000
   compress_threshold: 0.8
   keep_recent_messages: 6
 
