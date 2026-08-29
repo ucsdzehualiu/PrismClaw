@@ -456,6 +456,37 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
   color:var(--text-primary);border-radius:var(--radius-sm);padding:10px 12px;font-family:var(--font-mono);
   font-size:12px;resize:vertical;line-height:1.55}
 .persona-editor textarea:focus{outline:none;border-color:var(--accent-strong);box-shadow:0 0 0 3px var(--accent-glow)}
+/* 团队编排：设置面板 + 聊天内实时小组件 */
+.btn.danger{background:rgba(229,72,77,.12);color:var(--danger,#e5484d);border-color:rgba(229,72,77,.3)}
+.btn.danger:hover{background:rgba(229,72,77,.2)}
+.team-panel{margin:4px 0 10px;padding:10px 14px;background:rgba(127,127,127,.06);
+  border:1px solid rgba(127,127,127,.18);border-radius:10px;font-size:12.5px}
+.team-panel .tp-head{font-weight:600;color:var(--text-primary,#e6e6e6);margin-bottom:8px;font-size:13px}
+.team-panel .tp-steps{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 8px}
+.team-panel .tp-step{font-size:11.5px;padding:2px 8px;border-radius:11px;border:1px solid rgba(127,127,127,.3);color:var(--text-secondary,#aaa);line-height:1.6}
+.team-panel .tp-step.run{background:rgba(79,142,247,.16);border-color:rgba(79,142,247,.5);color:var(--text-primary,#e6e6e6)}
+.team-panel .tp-step.done{background:rgba(46,204,113,.13);border-color:rgba(46,204,113,.4);color:var(--text-secondary,#cfc)}
+.team-panel .tp-row{display:flex;align-items:center;gap:8px;padding:4px 8px;margin:0 -8px;border-radius:6px;cursor:pointer}
+.team-panel .tp-row:hover{background:rgba(127,127,127,.10)}
+.team-panel .tp-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+.team-panel .tp-name{font-weight:500;color:var(--text-primary,#e6e6e6);min-width:74px}
+.team-panel .tp-state{font-size:12px;flex:0 0 auto}
+.team-panel .tp-detail{color:var(--text-tertiary,#999);font-size:11.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1}
+.team-panel .tp-arrow{color:var(--text-tertiary,#999);font-size:10px;flex:0 0 auto}
+.team-panel .tp-expand{margin:2px 0 8px 30px;padding:7px 10px;background:rgba(0,0,0,.20);border-radius:6px;white-space:pre-wrap;font-size:12px;color:var(--text-secondary,#cfcfcf)}
+.team-panel .tp-syn{margin-top:8px;padding-top:8px;border-top:1px dashed rgba(127,127,127,.3);color:var(--text-secondary,#aaa)}
+
+/* 报告卡片（最终决策 / 风险评估 等结构化输出）——可折叠/展开 */
+.report-card{margin-top:6px;border:1px solid rgba(127,127,127,.22);border-radius:10px;overflow:hidden;background:rgba(127,127,127,.05)}
+.report-head{display:flex;align-items:center;gap:8px;padding:7px 12px;background:rgba(79,142,247,.10);border-bottom:1px solid rgba(127,127,127,.14)}
+.report-tag{font-weight:600;font-size:12.5px;color:var(--text-primary,#e6e6e6);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.report-toggle{cursor:pointer;font-size:12px;color:var(--text-secondary,#ccc);padding:2px 8px;border-radius:6px;border:1px solid rgba(127,127,127,.3);user-select:none;flex:0 0 auto}
+.report-toggle:hover{background:rgba(127,127,127,.12)}
+.report-body{padding:10px 12px;max-height:60vh;overflow:auto;color:var(--text-primary,#ddd)}
+.report-body.collapsed{display:none}
+
+
+
 .feature-check{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--bg-layer-2);
   border:1px solid var(--border-l1);border-radius:var(--radius-sm);margin-bottom:8px;cursor:pointer}
 .feature-check input{width:16px;height:16px;accent-color:var(--accent-strong);cursor:pointer}
@@ -546,9 +577,19 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
       </div>
       <div class="chat-input-area">
         <div class="chat-input">
+          <button class="btn" id="teamQuickBtn" onclick="toggleTeamQuick()" title="快速运行团队圆桌">🎭 团队</button>
           <textarea id="userInput" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
             rows="1" onkeydown="onInputKey(event)"></textarea>
           <button class="btn accent" onclick="sendMessage()" id="sendBtn">发送</button>
+        </div>
+        <div id="teamQuickPop" style="display:none;margin-top:6px;padding:8px 10px;background:var(--bg-layer-2);border:1px solid var(--border-l2);border-radius:8px">
+          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:5px">🎭 运行团队圆桌（选团队 + 填任务后点运行）</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+            <select id="teamQuickSelect" style="max-width:200px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;padding:6px;color:var(--text-primary)"></select>
+            <input id="teamQuickTask" placeholder="任务…如：今天英伟达要不要买？刚发财报" style="flex:1;min-width:220px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;padding:6px;color:var(--text-primary)"/>
+            <button class="btn accent" onclick="runTeamQuickFromChat()">🚀 运行</button>
+            <button class="btn" onclick="toggleTeamQuick()">✕ 关闭</button>
+          </div>
         </div>
       </div>
     </div>
@@ -600,6 +641,7 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
           <button class="settings-tab active" data-tab="overview" onclick="switchSettingsTab('overview')">概览</button>
           <button class="settings-tab" data-tab="model" onclick="switchSettingsTab('model')">模型<i class="tab-dirty" hidden>·未保存</i></button>
           <button class="settings-tab" data-tab="personas" onclick="switchSettingsTab('personas')">人格<i class="tab-dirty" hidden>·未保存</i></button>
+          <button class="settings-tab" data-tab="teams" onclick="switchSettingsTab('teams')">团队<i class="tab-dirty" hidden>·未保存</i></button>
           <button class="settings-tab" data-tab="features" onclick="switchSettingsTab('features')">功能开关<i class="tab-dirty" hidden>·未保存</i></button>
           <button class="settings-tab" data-tab="logs" onclick="switchSettingsTab('logs')">日志</button>
           <button class="settings-tab" data-tab="prefs" onclick="switchSettingsTab('prefs')">偏好<i class="tab-dirty" hidden>·未保存</i></button>
@@ -713,6 +755,30 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
               <textarea id="pa_identity" spellcheck="false"></textarea>
             </div>
             <button class="btn accent" onclick="savePersonas()">💾 保存人格</button>
+          </div>
+
+          <!-- 团队编排 -->
+          <div class="settings-panel" data-panel="teams">
+            <div class="setting-hint">团队编排：一个 lead 把任务分发给多名带独立人格/提示词的成员 <b>并行</b> 分析，再汇总成最终决策报告。在<b>聊天输入框左侧的「🎭 团队」按钮</b>一键运行，或在聊天输入框发 <code>/team &lt;团队名称&gt; &lt;任务&gt;</code>。</div>
+
+            <div class="setting-group">
+              <div class="sg-title">已保存的团队（workspace/teams/*.json）</div>
+              <div id="teamList" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
+              <div style="display:flex;gap:8px;margin-bottom:8px">
+                <button class="btn accent" onclick="newTeam()">➕ 新建团队</button>
+                <button class="btn" onclick="loadTeamFile()">📂 载入所选团队</button>
+              </div>
+              <div class="setting-hint">编辑下方 JSON（name / members[]，每成员含 name、role、color、prompt；可选 lead_prompt）。保存即热生效。</div>
+              <textarea id="team_json" spellcheck="false" style="width:100%;min-height:300px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:8px;padding:10px;font-family:var(--font-mono);font-size:12.5px;color:var(--text-primary)"></textarea>
+              <div id="teamError" class="setting-hint" style="color:var(--danger,#e5484d);display:none"></div>
+              <div style="display:flex;gap:8px;margin-top:8px">
+                <button class="btn accent" onclick="saveTeam()">💾 保存团队</button>
+                <button class="btn danger" onclick="deleteTeam()">🗑️ 删除所选团队</button>
+              </div>
+              <div class="setting-hint" style="margin-top:6px">模板示例：
+                <code>{"name": "产品评审团", "description": "多角色圆桌评审", "members": [{"name": "产品经理", "role": "评审定位/价值/优先级", "color": "#4f8ef7", "prompt": "你擅长评审产品定位与用户价值…"}, {"name": "技术负责人", "role": "评审技术/架构/成本", "color": "#34c759", "prompt": "你擅长评估技术选型与风险…"}], "lead_prompt": "你牵头综合各方意见给出最终决策报告。"}</code>
+              </div>
+            </div>
           </div>
 
           <!-- 功能开关 -->
@@ -935,6 +1001,7 @@ async function sendMessage() {
   toolCalls = [];
   messageBlocks = new Map();
   messageIdOrder = [];
+  resetTeamWidget();
   currentTraceUserText = text;
   renderTraceTable();
 
@@ -1020,6 +1087,12 @@ async function sendMessage() {
           // Handle model_reply event（模型该步的真实回复）
           if (event.type === 'model_reply' || (event.data && event.data.type === 'model_reply')) {
             updateModelContext(event.data || event, 'model_reply');
+            continue;
+          }
+
+          // Team 编排实时进度（并行成员 + lead 汇总）
+          if (event.type === 'team' || (event.data && event.data.type === 'team')) {
+            handleTeamEvent(event.data || event, asstId);
             continue;
           }
 
@@ -1162,6 +1235,33 @@ function addUserMessage(text) {
   scrollChat();
 }
 
+// 检测是否为结构化报告（最终决策 / 风险评估 等，以 [xxx报告] 或 [xxx决策] 收尾/包含）
+function isReportText(t) {
+  return /\[(?:最终决策|最终决策报告|风险评估|风险评估报告|决策报告|分析报告) *\]/.test(t || '');
+}
+function reportTagOf(t) {
+  const m = (t || '').match(/\[([^\]]*(?:决策|报告)[^\]]*)\]/);
+  return (m ? m[1] : '报告').trim() || '报告';
+}
+// 渲染 assistant 内容：可折叠报告卡片（若匹配报告标记），否则普通 markdown
+function renderAssistantContent(content) {
+  if (!isReportText(content)) return renderMarkdown(content);
+  const tag = escapeHtml(reportTagOf(content));
+  return '<div class="report-card">' +
+    '<div class="report-head">' +
+      '<span class="report-tag">📄 ' + tag + '</span>' +
+      '<span class="report-toggle" onclick="toggleReportCard(this)" title="折叠/展开">收起 ▴</span>' +
+    '</div>' +
+    '<div class="report-body">' + renderMarkdown(content) + '</div>' +
+    '</div>';
+}
+function toggleReportCard(btn) {
+  const body = btn && btn.closest && btn.closest('.report-head') ? btn.closest('.report-head').nextElementSibling : null;
+  if (!body) return;
+  const collapsed = body.classList.toggle('collapsed');
+  btn.textContent = collapsed ? '展开 ▾' : '收起 ▴';
+}
+
 function addAssistantMessage(content, loading) {
   const div = document.createElement('div');
   div.className = 'msg assistant';
@@ -1170,7 +1270,7 @@ function addAssistantMessage(content, loading) {
   bubble.className = 'bubble';
   bubble.id = div.id + '-bubble';
   bubble.innerHTML = loading ? '<div class="loading-dots"><span></span><span></span><span></span></div>'
-    : renderMarkdown(content);
+    : renderAssistantContent(content);
   div.appendChild(bubble);
   chatMessages.appendChild(div);
   scrollChat();
@@ -1180,9 +1280,104 @@ function addAssistantMessage(content, loading) {
 function updateAssistantContent(asstId, content) {
   const bubble = document.getElementById(asstId + '-bubble');
   if (bubble) {
-    bubble.innerHTML = renderMarkdown(content);
+    bubble.innerHTML = renderAssistantContent(content);
   }
   maybeRenderConfirm(asstId, content);
+  scrollChat();
+}
+
+// ---------- 团队编排实时小组件 ----------
+let teamWidgetEl = null;
+let teamMembers = {};   // memberName -> {role,color,status,detail,summary}
+let teamStages = [];    // [{stage,label,status:'idle'|'running'|'done'}]
+let teamPhase = '';     // '' | 'running' | 'synthesis' | 'done'
+let teamExpanded = {};  // memberName -> bool（是否展开看中间产物）
+let teamWidgetAsstId = null;
+function teamWidgetContainer(asstId) {
+  const parent = document.getElementById(asstId);
+  if (!parent) return null;
+  if (!teamWidgetEl) {
+    teamWidgetEl = document.createElement('div');
+    teamWidgetEl.className = 'team-panel';
+    // 事件委托：整块面板一个 click 监听，根治 inline onclick 引号/重渲染丢失问题
+    teamWidgetEl.addEventListener('click', (e) => {
+      const row = e.target.closest('.tp-row');
+      if (row && row.dataset.member) teamExpanded[row.dataset.member] = !teamExpanded[row.dataset.member];
+      if (teamWidgetAsstId) renderTeamWidget(teamWidgetAsstId);
+    });
+    parent.insertBefore(teamWidgetEl, parent.firstChild);
+  }
+  return teamWidgetEl;
+}
+function resetTeamWidget() { teamWidgetEl = null; teamMembers = {}; teamStages = []; teamPhase = ''; teamExpanded = {}; teamWidgetAsstId = null; }
+function teamStageLabel(stage) {
+  return ({analysis:'🔍 各方分析', risk:'🛡️ 风险·风控', decision:'🎯 决策'})[stage] || stage;
+}
+function handleTeamEvent(ev, asstId) {
+  if (!ev || !ev.phase) return;
+  const phase = ev.phase;
+  if (phase === 'start') { teamMembers = {}; teamStages = []; teamPhase = 'running'; teamWidgetEl = null; teamExpanded = {}; }
+  else if (phase === 'stage_start') {
+    // 阶段开始：标记当前阶段 running，其余已存在者保持 done
+    let found = false;
+    teamStages.forEach(s => { if (s.stage === ev.stage) { s.status = 'running'; s.label = ev.label || s.label; found = true; } });
+    if (!found) teamStages.push({ stage: ev.stage, label: ev.label || teamStageLabel(ev.stage), status: 'running' });
+  }
+  else if (phase === 'stage_done') {
+    teamStages.forEach(s => { if (s.stage === ev.stage) s.status = 'done'; });
+  }
+  else if (phase === 'member_start') {
+    teamMembers[ev.member] = { role: ev.role || '', color: ev.color || '#888888', status: 'running', detail: '⏳ 并行分析中…', summary: '' };
+  }
+  else if (phase === 'member_done') {
+    if (teamMembers[ev.member]) { teamMembers[ev.member].status = 'done'; teamMembers[ev.member].detail = '✅ ' + ev.bytes + ' B'; teamMembers[ev.member].summary = ev.summary || ''; }
+  }
+  else if (phase === 'member_retrying') {
+    if (teamMembers[ev.member]) teamMembers[ev.member].detail = '🔄 被打断，重建重试(' + (ev.attempts||2) + '回)…';
+  }
+  else if (phase === 'member_error') { if (teamMembers[ev.member]) { teamMembers[ev.member].status = 'error'; teamMembers[ev.member].detail = ev.error || '执行出错'; } }
+  else if (phase === 'synthesis_start') teamPhase = 'synthesis';
+  else if (phase === 'synthesis_done' || phase === 'done') teamPhase = 'done';
+
+  renderTeamWidget(asstId);
+}
+function renderTeamWidget(asstId) {
+  const box = teamWidgetContainer(asstId);
+  if (!box) return;
+  teamWidgetAsstId = asstId;
+  const names = Object.keys(teamMembers);
+  let html = '<div class="tp-head">🎭 团队并行编排' + (names.length ? '（' + names.length + ' 位成员）' : '') + '</div>';
+
+  // 阶段进度（分析→风控→决策）
+  if (teamStages.length) {
+    html += '<div class="tp-steps">';
+    teamStages.forEach(s => {
+      const cls = s.status === 'done' ? ' done' : (s.status === 'running' ? ' run' : '');
+      const mark = s.status === 'done' ? '✅' : (s.status === 'running' ? '⏳' : '○');
+      html += '<span class="tp-step' + cls + '">' + mark + ' ' + escapeHtml(s.label || teamStageLabel(s.stage)) + '</span>';
+    });
+    html += '</div>';
+  }
+
+  names.forEach(n => {
+    const m = teamMembers[n];
+    const open = teamExpanded[n];
+    const st = m.status === 'done' ? '✅' : (m.status === 'error' ? '❌' : '⏳');
+    const arrow = m.summary ? (open ? '▲ 收起' : '▼ 展开') : '';
+    html += '<div class="tp-row" data-member="' + n.replace(/"/g,'&quot;') + '"' + (m.summary ? ' title="点击查看该位成员的分析摘要"' : '') + '>' +
+      '<span class="tp-dot" style="background:' + escapeHtml(m.color || '#888') + '"></span>' +
+      '<span class="tp-name">' + escapeHtml(n) + '</span>' +
+      '<span class="tp-state">' + st + '</span>' +
+      '<span class="tp-detail">' + escapeHtml(m.detail || '') + '</span>' +
+      (arrow ? '<span class="tp-arrow">' + arrow + '</span>' : '') +
+      '</div>';
+    if (open && m.summary) {
+      html += '<div class="tp-expand" style="border-left:3px solid ' + escapeHtml(m.color || '#888') + '">' + escapeHtml(m.summary) + '</div>';
+    }
+  });
+  if (teamPhase === 'synthesis') html += '<div class="tp-syn">🧠 lead 汇总中…</div>';
+  else if (teamPhase === 'done') html += '<div class="tp-syn">📊 汇总完成，最终报告见下方</div>';
+  box.innerHTML = html;
   scrollChat();
 }
 
@@ -2400,6 +2595,7 @@ function switchSettingsTab(tab) {
   });
   if (tab === 'personas' && settingsPersonas) renderPersonas();
   if (tab === 'features' && settingsFeatures) renderFeatures();
+  if (tab === 'teams') loadTeams();
   if (tab === 'logs') loadLogs();
   if (tab === 'prefs') renderPrefs();
 }
@@ -2715,6 +2911,132 @@ async function savePersonas() {
   } catch (e) { showToast('保存人格失败：' + e.message, 'error'); }
 }
 
+// ---------- 团队编排 ----------
+let settingsTeams = [];          // [{slug,name,role_count,mtime}]
+let teamSelectedSlug = null;
+
+function teamSlugOf(name) {
+  return String(name || '').trim()
+    .replace(/[\\/:*?"<>|]/g, '_').replace(/\s+/g, '_') || 'team';
+}
+function currentTeamSlug() {
+  try { return teamSlugOf(JSON.parse(document.getElementById('team_json').value || '{}').name); }
+  catch (e) { return null; }
+}
+function showTeamError(msg) {
+  const el = document.getElementById('teamError');
+  el.textContent = msg || '';
+  el.style.display = msg ? 'block' : 'none';
+}
+async function loadTeams() {
+  try {
+    const r = await fetch('/api/teams');
+    const d = await r.json();
+    settingsTeams = d.teams || [];
+    renderTeamList();
+  } catch (e) { showTeamError('加载团队失败：' + e.message); }
+}
+// ---------- 一键运行团队（聊天区唯一入口） ----------
+function toggleTeamQuick() {
+  const pop = document.getElementById('teamQuickPop');
+  if (!pop) return;
+  const showing = pop.style.display === 'block';
+  pop.style.display = showing ? 'none' : 'block';
+  if (!showing) loadTeamQuickOptions();
+}
+async function loadTeamQuickOptions() {
+  const sel = document.getElementById('teamQuickSelect');
+  if (!sel) return;
+  sel.innerHTML = '<option value="">（加载中…）</option>';
+  try {
+    const r = await fetch('/api/teams');
+    const d = await r.json();
+    const teams = (d.teams || []) || [];
+    if (!teams.length) { sel.innerHTML = '<option value="">（暂无团队）</option>'; return; }
+    sel.innerHTML = teams.map(t => '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.name) + '（' + t.role_count + ' 位）</option>').join('');
+  } catch (e) {
+    sel.innerHTML = '<option value="">（加载失败）</option>';
+  }
+}
+function runTeamQuickFromChat() {
+  const sel = document.getElementById('teamQuickSelect');
+  const taskEl = document.getElementById('teamQuickTask');
+  if (!sel || !taskEl) return;
+  const team = sel.value;
+  const task = taskEl.value || '';
+  if (!team || team.indexOf('（') === 0) { showToast('请先选择团队', 'error'); return; }
+  if (!task.trim()) { showToast('请填写任务描述', 'error'); return; }
+  toggleTeamQuick();
+  const input = document.getElementById('userInput');
+  input.value = '/team ' + team + ' ' + task.trim();
+  sendMessage();
+}
+function renderTeamList() {
+  const box = document.getElementById('teamList');
+  box.innerHTML = '';
+  if (!settingsTeams.length) {
+    box.innerHTML = '<span class="setting-hint">暂无团队。点「新建团队」或手动创建 workspace/teams/*.json。</span>';
+    return;
+  }
+  settingsTeams.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'btn' + (teamSelectedSlug === t.slug ? ' accent' : '');
+    b.textContent = t.name + '（' + t.role_count + '）';
+    b.onclick = () => { teamSelectedSlug = t.slug; renderTeamList(); loadTeamFile(); };
+    box.appendChild(b);
+  });
+}
+const TEAM_TEMPLATE = JSON.stringify({
+  name: '产品评审团',
+  description: '多角色圆桌评审，输出决策报告',
+  lead_prompt: '你牵头综合各位成员意见，给出明确最终决策报告：结论、理由、风险。',
+  members: [
+    { name: '产品经理', role: '评审定位/用户价值/优先级', color: '#4f8ef7', prompt: '你是一位资深产品经理，评审产品定位、用户价值与关键优先级，分点简洁输出。' },
+    { name: '技术负责人', role: '评审技术/架构/成本/风险', color: '#34c759', prompt: '你是一位技术负责人，评估技术选型、实现复杂度、维护成本与风险，分点输出。' },
+    { name: '市场总监', role: '评审市场/竞争/推广', color: '#ff9f0a', prompt: '你是一位市场总监，评估市场规模、竞争、渠道与推广策略，分点输出。' }
+  ]
+}, null, 2);
+function newTeam() {
+  document.getElementById('team_json').value = TEAM_TEMPLATE;
+  teamSelectedSlug = null; renderTeamList();
+  showTeamError(''); markDirty('teams');
+}
+async function loadTeamFile() {
+  if (!teamSelectedSlug) { showTeamError('请先在列表选择要载入的团队'); return; }
+  try {
+    const r = await fetch('/api/teams/' + encodeURIComponent(teamSelectedSlug));
+    const spec = await r.json();
+    document.getElementById('team_json').value = JSON.stringify(spec, null, 2);
+    showTeamError(''); clearDirty('teams');
+  } catch (e) { showTeamError('载入失败：' + e.message); }
+}
+async function saveTeam() {
+  let spec;
+  try { spec = JSON.parse(document.getElementById('team_json').value || '{}'); }
+  catch (e) { showTeamError('JSON 格式错误：' + e.message); return; }
+  const slug = teamSlugOf(spec.name);
+  try {
+    const r = await fetch('/api/teams/' + encodeURIComponent(slug), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(spec),
+    });
+    const d = await r.json();
+    if (d.status !== 'success') { showTeamError(d.message || '保存失败'); return; }
+    showTeamError(''); clearDirty('teams');
+    teamSelectedSlug = d.slug; await loadTeams(); showToast('✅ 团队已保存，在聊天发 /team ' + spec.name + ' 触发', 'success');
+  } catch (e) { showTeamError('保存失败：' + e.message); }
+}
+async function deleteTeam() {
+  const slug = teamSelectedSlug || currentTeamSlug();
+  if (!slug) { showTeamError('请先选择要删除的团队'); return; }
+  if (!confirm('确定删除团队「' + slug + '」？此操作不可撤销。')) return;
+  try {
+    await fetch('/api/teams/' + encodeURIComponent(slug), { method: 'DELETE' });
+    teamSelectedSlug = null; document.getElementById('team_json').value = '';
+    showTeamError(''); await loadTeams(); showToast('🗑️ 已删除', 'success');
+  } catch (e) { showTeamError('删除失败：' + e.message); }
+}
+
 // ---------- 功能开关 ----------
 const FEATURE_LABELS = {
   enable_view_text_file: ['读取文件', 'view_text_file'],
@@ -2724,6 +3046,7 @@ const FEATURE_LABELS = {
   enable_download: ['文件下载', 'download_file'],
   enable_websearch: ['联网搜索 + 网页抓取', 'web_search / web_fetch'],
   enable_subagent: ['子代理', 'subagent'],
+  enable_team: ['团队编排', 'run_team / /team'],
   enable_cron: ['定时任务', 'cron'],
   enable_sandbox: ['沙箱隔离', 'sandbox'],
   enable_skills: ['技能系统', 'skills'],

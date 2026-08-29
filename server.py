@@ -142,6 +142,53 @@ async def update_persona(request: Request):
     return {"status": "success"}
 
 
+# ---- 团队编排（Teams）API ----
+
+def _safe_team_slug(slug: str) -> str:
+    import team as team_mod
+    slug = team_mod._slugify(slug or "")
+    if not slug or slug == "team":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="无效的团队名")
+    return slug
+
+@app.get("/api/teams")
+async def get_teams():
+    import team as team_mod
+    return {"teams": team_mod.list_teams(WORKSPACE_DIR)}
+
+
+@app.get("/api/teams/{slug}")
+async def get_team(slug: str):
+    import team as team_mod
+    spec = team_mod.load_team(_safe_team_slug(slug), WORKSPACE_DIR)
+    if spec is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="团队不存在")
+    return spec
+
+
+@app.post("/api/teams/{slug}")
+async def post_team(slug: str, request: Request):
+    import team as team_mod
+    body = await request.json()
+    result = team_mod.save_team(body, WORKSPACE_DIR)
+    if result.get("status") == "error":
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail=result.get("message", "保存失败"))
+    return result
+
+
+@app.delete("/api/teams/{slug}")
+async def delete_team(slug: str):
+    import team as team_mod
+    slug = _safe_team_slug(slug)
+    path = os.path.join(team_mod.get_teams_dir(WORKSPACE_DIR), slug + ".json")
+    if os.path.isfile(path):
+        os.remove(path)
+    return {"status": "success"}
+
+
 @app.get("/api/config")
 async def get_config():
     """返回设置页可编辑的配置子集（用于在界面里改模型/API Key 等）。"""

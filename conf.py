@@ -20,6 +20,7 @@ FLAGS = {
     # 高级功能
     "enable_websearch": True,
     "enable_subagent": True,
+    "enable_team": True,   # 团队编排（多智能体圆桌）
     "enable_cron": True,
     "enable_sandbox": False,
 

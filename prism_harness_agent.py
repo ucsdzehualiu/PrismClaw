@@ -11,6 +11,7 @@ import inspect
 import json
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 
@@ -490,6 +491,28 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
         if answer is not None and await sess.answer_pending(answer):
             return True, ""
         return True, "当前没有等待回答的问题。"
+    elif cmd.startswith("team"):
+        # /team <名称> <任务> —— 触发一次团队编排（并行多成员 + lead 汇总）。
+        # 把解析结果挂到 request 上，agent_runner 检测到后走专门的团队流式路径。
+        rest = cmd[len("team"):].strip()
+        if not rest:
+            return True, "用法：/team <团队名称> <任务>。团队在设置页「团队」里创建。"
+        # 团队名到任务：取第一个空格；若无空格视为团队名，任务留空。
+        parts = rest.split(" ", 1)
+        team_name = parts[0].strip()
+        task = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            import team as team_mod
+            from conf import FLAGS
+            if not FLAGS.get("enable_team", True):
+                return True, "团队编排功能已关闭（可在「功能开关」中开启）。"
+            spec = team_mod.load_team(team_name, "workspace")
+            if not spec:
+                return True, f"找不到团队「{team_name}」。可在设置页「团队」创建，或检查 workspace/teams/{team_name}.json。"
+        except Exception as e:
+            return True, f"读取团队失败：{e}"
+        request.team_run = (team_name, task)  # 交给 agent_runner 真正执行
+        return True, ""
     return False, ""  # 不认识的 / 命令，交给 agent 处理
 
 
@@ -620,6 +643,89 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         # 魔术命令
         is_magic, magic_ack = await handle_magic_command(request, sess)
         pending_exists = bool(await sess.get_pending_tool()) if is_magic else False
+
+        # 团队编排（/team <名称> <任务>）：并行多成员 + lead 汇总，独立流式路径
+        if getattr(request, "team_run", None):
+            team_name, team_task = request.team_run
+            response_q = request.response_queue
+            try:
+                import team as team_mod
+                team_spec = team_mod.load_team(team_name, workspace_dir)
+                if not team_spec:
+                    await response_q.put({
+                        "type": "status", "phase": "thinking", "step": 0,
+                        "detail": f"找不到团队「{team_name}」。",
+                    })
+                    await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
+                    await response_q.put(None)
+                    await sess.finish_request(request)
+                    continue
+
+                log_dir = cfg.get("logging", {}).get("dir", "session_logs")
+                run_id = "run_" + time.strftime("%Y%m%d_%H%M%S")
+                run_dir = os.path.join(log_dir, sess.session_id, "teams", run_id)
+
+                async def emit_team(ev):
+                    if request.canceled:
+                        return
+                    await response_q.put({"type": "team", **ev})
+
+                # 圆桌（19 位多阶段）需要更长的整轮预算 + 受限并发，避免成员超时中断
+                is_roundtable = team_spec.get("type") == "roundtable"
+                team_timeout = float(cfg.get("agent", {}).get(
+                    "roundtable_timeout", 1800 if is_roundtable else 600,
+                ))
+                member_timeout = 600.0 if is_roundtable else 300.0
+                max_concurrent = int(cfg.get("agent", {}).get("team_max_concurrent", 4))
+
+                async def run_team_and_emit():
+                    await response_q.put({
+                        "type": "status", "phase": "thinking", "step": 0,
+                        "detail": f"🎭 启动团队「{team_name}」并行编排…",
+                    })
+                    report, _results = await team_mod.run_team_stream(
+                        team_spec, team_task, emit_team, cfg, workspace_dir,
+                        run_dir=run_dir,
+                        member_timeout=member_timeout,
+                        max_concurrent=max_concurrent,
+                    )
+                    # 把最终报告作为正常 assistant 文本并入主对话
+                    await response_q.put({
+                        "msg_id": "team-report",
+                        "last": True,
+                        "contents": [{"type": "text", "content": report}],
+                    })
+
+                try:
+                    await asyncio.wait_for(run_team_and_emit(), timeout=team_timeout)
+                    if request.canceled:
+                        await response_q.put({"cancel": True, "last": True, "contents": []})
+                    else:
+                        await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
+                        await response_q.put(None)
+                except asyncio.TimeoutError:
+                    await response_q.put({
+                        "type": "status", "phase": "error",
+                        "detail": f"团队运行超时（>{team_timeout:.0f}s），已终止。",
+                    })
+                    await response_q.put({"error": "team timeout", "last": True, "contents": []})
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                console("[team-error]", e)
+                traceback.print_exc()
+                await response_q.put({
+                    "type": "status", "phase": "error",
+                    "detail": f"团队编排出错：{e}",
+                })
+                await response_q.put({"error": str(e), "last": True, "contents": []})
+            finally:
+                try:
+                    await response_q.put(None)
+                except Exception:
+                    pass
+                await sess.finish_request(request)
+            continue
 
         # 独立魔法命令（无 pending）：直接返回确认，不调 LLM
         if is_magic and not pending_exists:

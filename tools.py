@@ -913,6 +913,46 @@ async def run_subagent(
         return ToolResponse(content=[TextBlock(type="text", text=f"子代理执行出错：{e}")])
 
 
+async def run_team_tool(
+    team_name: str,
+    task: str,
+    workspace_dir: str = "workspace",
+) -> ToolResponse:
+    """触发一次「团队编排」：并行召集团队成员各自分析同一任务，lead 汇总成决策报告。
+
+    团队由 `workspace/teams/<名称>.json` 定义（可在设置页「团队」面板或手动编辑），
+    每个成员有独立的名称/角色/颜色/提示词。所有成员**并行**独立运行，
+    完成后由 lead 综合产出最终决策报告。
+
+    Args:
+        team_name: 团队名称（或 slug），须已存在于 workspace/teams/ 下。
+        task: 分派给所有成员要分析/完成的任务。
+    """
+    import team as team_mod
+
+    team = team_mod.load_team(team_name, workspace_dir)
+    if not team:
+        return ToolResponse(content=[TextBlock(type="text", text=f"找不到团队「{team_name}」。请先在设置页创建，团队成员需含 name/prompt。")])
+    if not (task or "").strip():
+        return ToolResponse(content=[TextBlock(type="text", text="错误：task 不能为空。")])
+    try:
+        from model_config import load_config
+        cfg = load_config()
+        report, _results = await team_mod.run_team_stream(
+            team,
+            task,
+            emit=None,  # 工具路径 v1 不向 SSE 实时发射，返回报告文本即可
+            cfg=cfg,
+            workspace_dir=workspace_dir,
+            run_dir=None,
+        )
+        return ToolResponse(content=[TextBlock(type="text", text=report)])
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        return ToolResponse(content=[TextBlock(type="text", text=f"团队运行出错：{e}")])
+
+
 # ---- 技能注册 ----
 
 async def build_toolkit(workspace_dir: str = "workspace") -> Toolkit:
@@ -980,6 +1020,13 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
         toolkit.register_tool_function(
             functools.partial(run_subagent, workspace_dir=workspace_dir),
             func_name="subagent",
+        )
+
+    # 团队编排：并行召集多名成员 + lead 汇总成决策报告
+    if FLAGS.get("enable_team", True):
+        toolkit.register_tool_function(
+            functools.partial(run_team_tool, workspace_dir=workspace_dir),
+            func_name="run_team",
         )
 
     return toolkit
