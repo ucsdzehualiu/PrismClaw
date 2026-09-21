@@ -132,7 +132,7 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .chat-messages{flex:1;overflow-y:auto;padding:20px 22px 28px;scroll-behavior:smooth}
 .chat-messages::-webkit-scrollbar{width:6px}
 .chat-messages::-webkit-scrollbar-thumb{background:var(--border-l2);border-radius:3px}
-.chat-input-area{padding:14px 20px 16px;border-top:1px solid var(--border-l1);background:var(--bg-layer-1)}
+.chat-input-area{padding:14px 20px 16px;border-top:1px solid var(--border-l1);background:var(--bg-layer-1);position:relative}
 .chat-input{display:flex;gap:10px;align-items:flex-end}
 .chat-input textarea{flex:1;background:var(--bg-input);border:1px solid var(--border-l2);
   color:var(--text-primary);padding:12px 16px;border-radius:var(--radius);resize:none;
@@ -140,6 +140,46 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
   transition:border-color var(--transition),box-shadow var(--transition)}
 .chat-input textarea:focus{outline:none;border-color:var(--accent-strong);box-shadow:0 0 0 3px var(--accent-glow)}
 .chat-input textarea::placeholder{color:var(--text-tertiary)}
+
+/* ---- 团队选择菜单：覆盖层，不是第二个输入框 ----
+   开关一律走 .open 类，绝不写内联 display——内联 display:block 会覆盖这里的
+   display:flex，菜单就不再是 flex 容器，flex:1 / min-height:0 全部失效，
+   列表会被撑高再被 overflow:hidden 裁掉（表现为「菜单里只有 8 个团队」）。 */
+.team-menu{display:none;position:absolute;left:20px;right:20px;bottom:calc(100% - 10px);
+  max-height:min(58vh,460px);flex-direction:column;background:var(--bg-layer-2);
+  border:1px solid var(--border-l3);border-radius:var(--radius);
+  box-shadow:0 14px 36px rgba(0,0,0,.5);overflow:hidden;z-index:40}
+.team-menu.open{display:flex}
+.team-menu-head{display:flex;justify-content:space-between;align-items:center;padding:9px 13px;
+  font-size:11px;color:var(--text-tertiary);border-bottom:1px solid var(--border-l1);
+  letter-spacing:.06em;text-transform:uppercase;font-weight:600;flex:none}
+/* flex:1 + min-height:0 缺一不可：flex 子项默认 min-height:auto 不肯收缩 */
+.team-menu-list{flex:1;min-height:0;overflow-y:auto;padding:4px}
+.team-menu-list::-webkit-scrollbar{width:6px}
+.team-menu-list::-webkit-scrollbar-thumb{background:var(--border-l2);border-radius:3px}
+.team-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;border:none;
+  background:transparent;color:var(--text-primary);cursor:pointer;border-radius:var(--radius-xs);
+  font-size:13px;font-family:var(--font-sans);text-align:left;transition:background var(--transition)}
+.team-menu-item:hover{background:var(--bg-layer-3)}
+.team-menu-item.active{background:var(--accent-glow)}
+.team-menu-item .tmi-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.team-menu-item .tmi-tag{font-size:10.5px;color:var(--text-tertiary);border:1px solid var(--border-l2);
+  border-radius:9px;padding:1px 7px;flex:none;white-space:nowrap}
+.team-menu-empty{padding:11px 13px;font-size:12px;color:var(--text-tertiary);line-height:1.6}
+
+/* ---- 团队模式条：一条 chip 取代原来的第二个输入框 ---- */
+.team-mode-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+.tmb-chip{display:inline-flex;align-items:center;gap:6px;background:var(--accent-glow);
+  border:1px solid var(--accent-strong);border-radius:14px;padding:3px 5px 3px 11px;
+  font-size:12.5px;color:var(--text-primary)}
+.tmb-chip b{font-weight:600}
+.tmb-meta{color:var(--text-tertiary);font-weight:400}
+.tmb-x{cursor:pointer;padding:0 6px;border-radius:50%;color:var(--text-tertiary);
+  font-size:13px;line-height:1.4;user-select:none}
+.tmb-x:hover{color:var(--danger);background:rgba(255,80,80,.12)}
+.tmb-hint{font-size:11.5px;color:var(--text-tertiary)}
+.chat-input.run-mode textarea{border-color:var(--accent-strong)}
+.chat-input.run-mode textarea:focus{box-shadow:0 0 0 3px var(--accent-glow)}
 
 /* ---- Trace view ---- */
 .trace-view{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden;background:var(--bg-base)}
@@ -475,6 +515,11 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .team-panel .tp-arrow{color:var(--text-tertiary,#999);font-size:10px;flex:0 0 auto}
 .team-panel .tp-expand{margin:2px 0 8px 30px;padding:7px 10px;background:rgba(0,0,0,.20);border-radius:6px;white-space:pre-wrap;font-size:12px;color:var(--text-secondary,#cfcfcf)}
 .team-panel .tp-syn{margin-top:8px;padding-top:8px;border-top:1px dashed rgba(127,127,127,.3);color:var(--text-secondary,#aaa)}
+.team-panel .tp-elapsed,.team-panel .tp-toggle{font-weight:400;font-size:11.5px;color:var(--text-tertiary,#999);margin-left:8px;white-space:nowrap}
+.team-panel .tp-toggle{cursor:pointer;border:1px solid rgba(127,127,127,.3);border-radius:10px;padding:1px 8px;user-select:none}
+.team-panel .tp-toggle:hover{color:var(--text-primary,#e6e6e6);border-color:rgba(127,127,127,.55)}
+.team-panel .tp-collapsed-sum{font-size:11.5px;color:var(--text-tertiary,#999);padding:1px 0 3px}
+.team-panel .tp-row.error .tp-name{color:var(--danger,#ef4444)}
 
 /* 报告卡片（最终决策 / 风险评估 等结构化输出）——可折叠/展开 */
 .report-card{margin-top:6px;border:1px solid rgba(127,127,127,.22);border-radius:10px;overflow:hidden;background:rgba(127,127,127,.05)}
@@ -576,20 +621,22 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
         <div class="trace-log" id="traceLog"></div>
       </div>
       <div class="chat-input-area">
-        <div class="chat-input">
-          <button class="btn" id="teamQuickBtn" onclick="toggleTeamQuick()" title="快速运行团队圆桌">🎭 团队</button>
+        <!-- 团队选择：点 🎭 弹出的覆盖层菜单（不是第二个输入框） -->
+        <div id="teamMenu" class="team-menu">
+          <div class="team-menu-head"><span>选择团队</span><span id="teamMenuCount"></span></div>
+          <div class="team-menu-list" id="teamMenuList"></div>
+        </div>
+        <!-- 团队模式条：选中团队后出现在输入框上方，回车即运行 -->
+        <div id="teamModeBar" class="team-mode-bar" style="display:none">
+          <span class="tmb-chip">🎭 <b id="teamModeName"></b><span class="tmb-meta" id="teamModeMeta"></span>
+            <span class="tmb-x" onclick="exitTeamMode()" title="退出团队模式（Esc）">✕</span></span>
+          <span class="tmb-hint">回车即运行 · 运行中可点右上角「停止」中断</span>
+        </div>
+        <div class="chat-input" id="chatInputRow">
+          <button class="btn" id="teamQuickBtn" onclick="toggleTeamMenu()" title="选择一个团队，用它的多位专家来跑这个任务">🎭 团队</button>
           <textarea id="userInput" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
             rows="1" onkeydown="onInputKey(event)"></textarea>
           <button class="btn accent" onclick="sendMessage()" id="sendBtn">发送</button>
-        </div>
-        <div id="teamQuickPop" style="display:none;margin-top:6px;padding:8px 10px;background:var(--bg-layer-2);border:1px solid var(--border-l2);border-radius:8px">
-          <div style="font-size:12px;color:var(--text-secondary);margin-bottom:5px">🎭 运行团队圆桌（选团队 + 填任务后点运行）</div>
-          <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
-            <select id="teamQuickSelect" style="max-width:200px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;padding:6px;color:var(--text-primary)"></select>
-            <input id="teamQuickTask" placeholder="任务…如：今天英伟达要不要买？刚发财报" style="flex:1;min-width:220px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:6px;padding:6px;color:var(--text-primary)"/>
-            <button class="btn accent" onclick="runTeamQuickFromChat()">🚀 运行</button>
-            <button class="btn" onclick="toggleTeamQuick()">✕ 关闭</button>
-          </div>
         </div>
       </div>
     </div>
@@ -759,24 +806,26 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 
           <!-- 团队编排 -->
           <div class="settings-panel" data-panel="teams">
-            <div class="setting-hint">团队编排：一个 lead 把任务分发给多名带独立人格/提示词的成员 <b>并行</b> 分析，再汇总成最终决策报告。在<b>聊天输入框左侧的「🎭 团队」按钮</b>一键运行，或在聊天输入框发 <code>/team &lt;团队名称&gt; &lt;任务&gt;</code>。</div>
+            <div class="setting-hint">团队编排：把任务分发给多名带独立人格/提示词的成员，按<b>阶段</b>执行后汇总成最终报告。三种类型：<b>并行</b>（成员同时分析→lead 汇总）、<b>圆桌</b>（分析→风控→决策）、<b>多阶段</b>（自定义阶段序列，阶段内并行、阶段间传递产出）。在<b>聊天输入框左侧的「🎭 团队」按钮</b>一键运行，或在输入框发 <code>/team &lt;团队名称&gt; &lt;任务&gt;</code>。</div>
 
             <div class="setting-group">
-              <div class="sg-title">已保存的团队（workspace/teams/*.json）</div>
+              <div class="sg-title">已保存的团队（内置在 teams/，自建在 workspace/teams/）</div>
               <div id="teamList" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px"></div>
-              <div style="display:flex;gap:8px;margin-bottom:8px">
-                <button class="btn accent" onclick="newTeam()">➕ 新建团队</button>
+              <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                <button class="btn accent" onclick="newTeam()">➕ 新建并行团队</button>
+                <button class="btn accent" onclick="newPipelineTeam()">➕ 新建多阶段团队</button>
                 <button class="btn" onclick="loadTeamFile()">📂 载入所选团队</button>
               </div>
-              <div class="setting-hint">编辑下方 JSON（name / members[]，每成员含 name、role、color、prompt；可选 lead_prompt）。保存即热生效。</div>
+              <div class="setting-hint">编辑下方 JSON 后保存即热生效。并行团队写 <code>name / members[] / lead_prompt</code>；多阶段团队写 <code>type:"pipeline" + stages[]</code>，每个 stage 含 <code>id / label / task / members[]</code>。</div>
               <textarea id="team_json" spellcheck="false" style="width:100%;min-height:300px;background:var(--bg-input);border:1px solid var(--border-l2);border-radius:8px;padding:10px;font-family:var(--font-mono);font-size:12.5px;color:var(--text-primary)"></textarea>
               <div id="teamError" class="setting-hint" style="color:var(--danger,#e5484d);display:none"></div>
               <div style="display:flex;gap:8px;margin-top:8px">
                 <button class="btn accent" onclick="saveTeam()">💾 保存团队</button>
                 <button class="btn danger" onclick="deleteTeam()">🗑️ 删除所选团队</button>
               </div>
-              <div class="setting-hint" style="margin-top:6px">模板示例：
-                <code>{"name": "产品评审团", "description": "多角色圆桌评审", "members": [{"name": "产品经理", "role": "评审定位/价值/优先级", "color": "#4f8ef7", "prompt": "你擅长评审产品定位与用户价值…"}, {"name": "技术负责人", "role": "评审技术/架构/成本", "color": "#34c759", "prompt": "你擅长评估技术选型与风险…"}], "lead_prompt": "你牵头综合各方意见给出最终决策报告。"}</code>
+              <div class="setting-hint" style="margin-top:6px">
+                并行团队示例：<code>{"name":"产品评审团","members":[{"name":"产品经理","role":"评审定位","color":"#4f8ef7","prompt":"你擅长评审产品定位…"}],"lead_prompt":"你牵头综合各方意见给出最终决策报告。"}</code><br>
+                多阶段团队示例：<code>{"name":"研究小队","type":"pipeline","final":"last","stages":[{"id":"s1","label":"并行调研","members":[{"name":"调研员","prompt":"…"}]},{"id":"s2","label":"汇总裁决","members":[{"name":"主编","prompt":"…"}]}]}</code>
               </div>
             </div>
           </div>
@@ -976,19 +1025,39 @@ function autoResize() {
 }
 userInput.addEventListener('input', autoResize);
 
+// Esc → 先关团队菜单，再退出团队模式；点空白处也关菜单
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Escape') return;
+  const menu = document.getElementById('teamMenu');
+  if (menu && menu.classList.contains('open')) { closeTeamMenu(); return; }
+  if (selectedTeam) exitTeamMode();
+});
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('teamMenu');
+  if (!menu || !menu.classList.contains('open')) return;
+  if (menu.contains(e.target)) return;
+  if (e.target.closest && e.target.closest('#teamQuickBtn')) return;   // 交给按钮自己 toggle
+  closeTeamMenu();
+});
+
 async function sendMessage() {
-  const text = userInput.value.trim();
-  if (!text) return;
+  const task = userInput.value.trim();
+  if (!task) return;
+  // 团队模式：同一个输入框，内容作为团队任务发给后端；气泡里仍显示任务原文（带团队名）
+  const team = selectedTeam;
+  const payload = team ? ('/team ' + team.name + ' ' + task) : task;
+  const shown = team ? ('🎭 ' + team.name + ' · ' + task) : task;
   userInput.value = '';
   userInput.style.height = 'auto';
+  exitTeamMode();          // 发完即退出团队模式，避免下一条普通消息被误当成团队任务
   sendBtn.disabled = true;
   setStatus('thinking', '思考中');
   showStopButton(true);   // 流式进行中 → 显示停止按钮
   showLiveStatus(false);
 
   // Add user message
-  addUserMessage(text);
-  messages.push({ role: 'user', content: text, contents: [] });
+  addUserMessage(shown);
+  messages.push({ role: 'user', content: shown, contents: [] });
 
   // Create assistant message placeholder
   const asstId = addAssistantMessage('', true);
@@ -1002,7 +1071,7 @@ async function sendMessage() {
   messageBlocks = new Map();
   messageIdOrder = [];
   resetTeamWidget();
-  currentTraceUserText = text;
+  currentTraceUserText = shown;
   renderTraceTable();
 
   // SSE request
@@ -1015,7 +1084,7 @@ async function sendMessage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         session_id: SESSION_ID,
-        content: [{ type: 'text', text }],
+        content: [{ type: 'text', text: payload }],
       }),
       signal: abortController.signal,
     });
@@ -1232,7 +1301,7 @@ function addUserMessage(text) {
   div.className = 'msg user';
   div.innerHTML = `<div class="bubble">${escapeHtml(text)}</div>`;
   chatMessages.appendChild(div);
-  scrollChat();
+  scrollChat(true);
 }
 
 // 检测是否为结构化报告（最终决策 / 风险评估 等，以 [xxx报告] 或 [xxx决策] 收尾/包含）
@@ -1273,7 +1342,7 @@ function addAssistantMessage(content, loading) {
     : renderAssistantContent(content);
   div.appendChild(bubble);
   chatMessages.appendChild(div);
-  scrollChat();
+  scrollChat(true);
   return div.id;
 }
 
@@ -1288,11 +1357,18 @@ function updateAssistantContent(asstId, content) {
 
 // ---------- 团队编排实时小组件 ----------
 let teamWidgetEl = null;
-let teamMembers = {};   // memberName -> {role,color,status,detail,summary}
+let teamMembers = {};   // key -> {name,stage,stageLabel,role,color,status,detail,summary}
 let teamStages = [];    // [{stage,label,status:'idle'|'running'|'done'}]
 let teamPhase = '';     // '' | 'running' | 'synthesis' | 'done'
-let teamExpanded = {};  // memberName -> bool（是否展开看中间产物）
+let teamExpanded = {};  // key -> bool（是否展开看中间产物）
 let teamWidgetAsstId = null;
+let teamKind = '';      // pipeline | roundtable | parallel（start 事件里的 stage 字段）
+let teamStartTs = 0;
+let teamName = '';           // 本次运行的团队名（start 事件的 team 字段）
+let teamStageTotal = 0;      // 服务端给的阶段总数（stage_start 的 total），用于「阶段 x/y」
+let teamCollapsed = false;   // 跑完后自动收起成员明细，避免把最终报告挤到屏幕外
+let teamTimer = null;
+
 function teamWidgetContainer(asstId) {
   const parent = document.getElementById(asstId);
   if (!parent) return null;
@@ -1301,6 +1377,11 @@ function teamWidgetContainer(asstId) {
     teamWidgetEl.className = 'team-panel';
     // 事件委托：整块面板一个 click 监听，根治 inline onclick 引号/重渲染丢失问题
     teamWidgetEl.addEventListener('click', (e) => {
+      if (e.target.closest('.tp-toggle')) {   // 展开/收起成员明细
+        teamCollapsed = !teamCollapsed;
+        if (teamWidgetAsstId) renderTeamWidget(teamWidgetAsstId);
+        return;
+      }
       const row = e.target.closest('.tp-row');
       if (row && row.dataset.member) teamExpanded[row.dataset.member] = !teamExpanded[row.dataset.member];
       if (teamWidgetAsstId) renderTeamWidget(teamWidgetAsstId);
@@ -1309,35 +1390,86 @@ function teamWidgetContainer(asstId) {
   }
   return teamWidgetEl;
 }
-function resetTeamWidget() { teamWidgetEl = null; teamMembers = {}; teamStages = []; teamPhase = ''; teamExpanded = {}; teamWidgetAsstId = null; }
+function stopTeamTimer() { if (teamTimer) { clearInterval(teamTimer); teamTimer = null; } }
+// 秒级刷新「已用时」：只改一个文本节点，不重渲染面板（重渲染会打扰滚动/展开状态）
+function startTeamTimer() {
+  stopTeamTimer();
+  teamTimer = setInterval(() => {
+    if (teamPhase === 'done' || !teamWidgetEl) { stopTeamTimer(); return; }
+    const el = teamWidgetEl.querySelector('.tp-elapsed');
+    if (el && teamStartTs) el.textContent = teamElapsedText();
+  }, 1000);
+}
+function teamElapsedText() {
+  if (!teamStartTs) return '';
+  const s = Math.round((Date.now() - teamStartTs) / 1000);
+  return (teamPhase === 'done' ? ' · 耗时 ' : ' · 已用时 ') + s + 's';
+}
+function resetTeamWidget() {
+  teamWidgetEl = null; teamMembers = {}; teamStages = []; teamPhase = '';
+  teamExpanded = {}; teamWidgetAsstId = null; teamKind = ''; teamStartTs = 0;
+  teamName = ''; teamStageTotal = 0; teamCollapsed = false; stopTeamTimer();
+}
 function teamStageLabel(stage) {
   return ({analysis:'🔍 各方分析', risk:'🛡️ 风险·风控', decision:'🎯 决策'})[stage] || stage;
 }
+function teamKindLabel(kind) {
+  return ({
+    pipeline: '多阶段管线', roundtable: '两阶段圆桌', analysis: '两阶段圆桌',
+    parallel: '并行圆桌',
+  })[kind] || '团队编排';
+}
+// 成员行按「阶段::成员」唯一化——同一成员在多阶段出现时各占一行，不互相覆盖
+function teamMemberKey(ev) { return ev.stage ? (ev.stage + '::' + ev.member) : ev.member; }
 function handleTeamEvent(ev, asstId) {
   if (!ev || !ev.phase) return;
   const phase = ev.phase;
-  if (phase === 'start') { teamMembers = {}; teamStages = []; teamPhase = 'running'; teamWidgetEl = null; teamExpanded = {}; }
+  if (phase === 'start') {
+    teamMembers = {}; teamStages = []; teamPhase = 'running'; teamWidgetEl = null;
+    teamExpanded = {}; teamKind = ev.stage || 'parallel'; teamStartTs = Date.now();
+    teamName = ev.team || ''; teamStageTotal = 0; teamCollapsed = false; startTeamTimer();
+  }
   else if (phase === 'stage_start') {
     // 阶段开始：标记当前阶段 running，其余已存在者保持 done
     let found = false;
     teamStages.forEach(s => { if (s.stage === ev.stage) { s.status = 'running'; s.label = ev.label || s.label; found = true; } });
     if (!found) teamStages.push({ stage: ev.stage, label: ev.label || teamStageLabel(ev.stage), status: 'running' });
+    if (ev.total) teamStageTotal = ev.total;   // 服务端的权威总数，别用「已发现数」
+    // 状态栏跟着走：长流程里用户能一眼看到「现在跑到第几阶段」
+    const idx = teamStages.findIndex(s => s.stage === ev.stage) + 1;
+    setStatus('thinking', '🎭 ' + (ev.label || teamStageLabel(ev.stage)) + ' · 阶段 ' + idx + '/' + (teamStageTotal || teamStages.length));
   }
   else if (phase === 'stage_done') {
     teamStages.forEach(s => { if (s.stage === ev.stage) s.status = 'done'; });
   }
   else if (phase === 'member_start') {
-    teamMembers[ev.member] = { role: ev.role || '', color: ev.color || '#888888', status: 'running', detail: '⏳ 并行分析中…', summary: '' };
+    const st = teamStages.find(s => s.stage === ev.stage);
+    teamMembers[teamMemberKey(ev)] = {
+      name: ev.member, stage: ev.stage || '',
+      stageLabel: (st && st.label) || '',
+      role: ev.role || '', color: ev.color || '#888888',
+      status: 'running', detail: '⏳ 分析中…', summary: '',
+    };
   }
   else if (phase === 'member_done') {
-    if (teamMembers[ev.member]) { teamMembers[ev.member].status = 'done'; teamMembers[ev.member].detail = '✅ ' + ev.bytes + ' B'; teamMembers[ev.member].summary = ev.summary || ''; }
+    const m = teamMembers[teamMemberKey(ev)];
+    if (m) { m.status = 'done'; m.detail = '✅ ' + ev.bytes + ' B'; m.summary = ev.summary || ''; }
   }
   else if (phase === 'member_retrying') {
-    if (teamMembers[ev.member]) teamMembers[ev.member].detail = '🔄 被打断，重建重试(' + (ev.attempts||2) + '回)…';
+    const m = teamMembers[teamMemberKey(ev)];
+    if (m) m.detail = '🔄 被打断，重建重试(' + (ev.attempts || 2) + '回)…';
   }
-  else if (phase === 'member_error') { if (teamMembers[ev.member]) { teamMembers[ev.member].status = 'error'; teamMembers[ev.member].detail = ev.error || '执行出错'; } }
+  else if (phase === 'member_error') {
+    const m = teamMembers[teamMemberKey(ev)];
+    if (m) { m.status = 'error'; m.detail = ev.error || '执行出错'; }
+  }
   else if (phase === 'synthesis_start') teamPhase = 'synthesis';
-  else if (phase === 'synthesis_done' || phase === 'done') teamPhase = 'done';
+  else if (phase === 'synthesis_done' || phase === 'done') {
+    teamPhase = 'done';
+    stopTeamTimer();
+    // 成员多时跑完自动收起明细，让最终报告直接可见（可一键展开）
+    if (Object.keys(teamMembers).length >= 5) teamCollapsed = true;
+  }
 
   renderTeamWidget(asstId);
 }
@@ -1345,10 +1477,25 @@ function renderTeamWidget(asstId) {
   const box = teamWidgetContainer(asstId);
   if (!box) return;
   teamWidgetAsstId = asstId;
-  const names = Object.keys(teamMembers);
-  let html = '<div class="tp-head">🎭 团队并行编排' + (names.length ? '（' + names.length + ' 位成员）' : '') + '</div>';
+  const keys = Object.keys(teamMembers);
 
-  // 阶段进度（分析→风控→决策）
+  // 同名成员出现多次时（如某成员参与两个阶段），行内补阶段名以区分。
+  // 阶段名按 stage 实时解析（不依赖 member_start 当刻是否已登记该阶段）。
+  const nameCount = {};
+  keys.forEach(k => { const n = teamMembers[k].name; nameCount[n] = (nameCount[n] || 0) + 1; });
+  const stageLabelOf = st => ((teamStages.find(s => s.stage === st) || {}).label) || '';
+
+  let html = '<div class="tp-head">🎭 ' + (teamName ? escapeHtml(teamName) + ' · ' : '') + teamKindLabel(teamKind);
+  if (keys.length) html += '（' + keys.length + ' 位成员）';
+  if (teamStages.length) {
+    const done = teamStages.filter(s => s.status === 'done').length;
+    html += ' · 阶段 ' + done + '/' + (teamStageTotal || teamStages.length);
+  }
+  if (teamStartTs) html += '<span class="tp-elapsed">' + escapeHtml(teamElapsedText()) + '</span>';
+  if (keys.length) html += '<span class="tp-toggle">' + (teamCollapsed ? '▸ 展开成员' : '▾ 收起成员') + '</span>';
+  html += '</div>';
+
+  // 阶段进度条
   if (teamStages.length) {
     html += '<div class="tp-steps">';
     teamStages.forEach(s => {
@@ -1359,24 +1506,37 @@ function renderTeamWidget(asstId) {
     html += '</div>';
   }
 
-  names.forEach(n => {
-    const m = teamMembers[n];
-    const open = teamExpanded[n];
-    const st = m.status === 'done' ? '✅' : (m.status === 'error' ? '❌' : '⏳');
-    const arrow = m.summary ? (open ? '▲ 收起' : '▼ 展开') : '';
-    html += '<div class="tp-row" data-member="' + n.replace(/"/g,'&quot;') + '"' + (m.summary ? ' title="点击查看该位成员的分析摘要"' : '') + '>' +
-      '<span class="tp-dot" style="background:' + escapeHtml(m.color || '#888') + '"></span>' +
-      '<span class="tp-name">' + escapeHtml(n) + '</span>' +
-      '<span class="tp-state">' + st + '</span>' +
-      '<span class="tp-detail">' + escapeHtml(m.detail || '') + '</span>' +
-      (arrow ? '<span class="tp-arrow">' + arrow + '</span>' : '') +
-      '</div>';
-    if (open && m.summary) {
-      html += '<div class="tp-expand" style="border-left:3px solid ' + escapeHtml(m.color || '#888') + '">' + escapeHtml(m.summary) + '</div>';
-    }
-  });
-  if (teamPhase === 'synthesis') html += '<div class="tp-syn">🧠 lead 汇总中…</div>';
-  else if (teamPhase === 'done') html += '<div class="tp-syn">📊 汇总完成，最终报告见下方</div>';
+  if (teamCollapsed) {
+    const okN = keys.filter(k => teamMembers[k].status === 'done').length;
+    const errN = keys.filter(k => teamMembers[k].status === 'error').length;
+    const runN = keys.length - okN - errN;
+    html += '<div class="tp-collapsed-sum">成员明细已收起：' +
+      (okN ? '✅ ' + okN : '') + (runN ? (okN ? ' · ' : '') + '⏳ ' + runN : '') +
+      (errN ? ' · ❌ ' + errN : '') + '　（点上方「展开成员」查看每人的产出摘要）</div>';
+  } else {
+    keys.forEach(k => {
+      const m = teamMembers[k];
+      const open = teamExpanded[k];
+      const st = m.status === 'done' ? '✅' : (m.status === 'error' ? '❌' : '⏳');
+      const arrow = m.summary ? (open ? '▲ 收起' : '▼ 展开') : '';
+      let label = m.name;
+      const sl = stageLabelOf(m.stage) || m.stageLabel;
+      if (nameCount[m.name] > 1 && sl) label += '（' + sl + '）';
+      html += '<div class="tp-row' + (m.status === 'error' ? ' error' : '') + '" data-member="' + escapeAttr(k) + '"' +
+        (m.summary ? ' title="点击查看该位成员的产出摘要"' : '') + '>' +
+        '<span class="tp-dot" style="background:' + escapeAttr(m.color || '#888') + '"></span>' +
+        '<span class="tp-name">' + escapeHtml(label) + '</span>' +
+        '<span class="tp-state">' + st + '</span>' +
+        '<span class="tp-detail">' + escapeHtml(m.detail || '') + '</span>' +
+        (arrow ? '<span class="tp-arrow">' + arrow + '</span>' : '') +
+        '</div>';
+      if (open && m.summary) {
+        html += '<div class="tp-expand" style="border-left:3px solid ' + escapeAttr(m.color || '#888') + '">' + escapeHtml(m.summary) + '</div>';
+      }
+    });
+  }
+  if (teamPhase === 'synthesis') html += '<div class="tp-syn">🧠 主理人汇总中…</div>';
+  else if (teamPhase === 'done') html += '<div class="tp-syn">📊 编排完成，最终报告见下方</div>';
   box.innerHTML = html;
   scrollChat();
 }
@@ -2125,8 +2285,16 @@ function updateTimelineResult(tc) {
 }
 
 // ====== Helpers ======
-function scrollChat() {
-  chatMessages.scrollTop = chatMessages.scrollHeight;
+// 是否已滚到底部附近（留 80px 容差）
+function isNearBottom(el, px) {
+  return el.scrollHeight - el.scrollTop - el.clientHeight <= (px || 80);
+}
+// 自动贴底：默认只在用户本来就在底部时才跟随，避免他翻看历史时被强行拽下去；
+// 用户主动发消息/新消息落位时传 force=true 强制到底。
+function scrollChat(force) {
+  if (force === true || isNearBottom(chatMessages)) {
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+  }
 }
 
 function setStatus(type, text) {
@@ -2536,6 +2704,10 @@ function escapeHtml(s) {
   s = String(s);
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+// 放进 HTML 属性值里时必须再转义引号，否则名字里带 " 会把属性截断（escapeHtml 不处理引号）
+function escapeAttr(s) {
+  return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 
 function renderMarkdown(text) {
   if (!text) return '';
@@ -2936,52 +3108,112 @@ async function loadTeams() {
     renderTeamList();
   } catch (e) { showTeamError('加载团队失败：' + e.message); }
 }
-// ---------- 一键运行团队（聊天区唯一入口） ----------
-function toggleTeamQuick() {
-  const pop = document.getElementById('teamQuickPop');
-  if (!pop) return;
-  const showing = pop.style.display === 'block';
-  pop.style.display = showing ? 'none' : 'block';
-  if (!showing) loadTeamQuickOptions();
+// ---------- 团队模式：选团队 → 同一个输入框直接变任务框 ----------
+// 设计：全程只有一个输入框。点 🎭 弹出的是「团队列表覆盖层」，不是第二个输入框；
+// 选中后输入框上方出现一条模式 chip，输入框变成任务框，发送按钮变「运行」。
+let teamQuickCache = [];
+let selectedTeam = null;
+
+function teamTypeLabel(t) {
+  const ty = (t && t.type) || 'parallel';
+  if (ty === 'pipeline') return '多阶段';
+  if (ty === 'roundtable') return '圆桌';
+  return '并行';
 }
-async function loadTeamQuickOptions() {
-  const sel = document.getElementById('teamQuickSelect');
-  if (!sel) return;
-  sel.innerHTML = '<option value="">（加载中…）</option>';
+function toggleTeamMenu() {
+  const menu = document.getElementById('teamMenu');
+  if (!menu) return;
+  if (menu.classList.contains('open')) { closeTeamMenu(); return; }
+  renderTeamMenu().then(() => menu.classList.add('open'));
+}
+function closeTeamMenu() {
+  const menu = document.getElementById('teamMenu');
+  if (menu) menu.classList.remove('open');
+}
+async function renderTeamMenu() {
+  const list = document.getElementById('teamMenuList');
+  const cnt = document.getElementById('teamMenuCount');
+  if (!list) return;
+  list.innerHTML = '<div class="team-menu-empty">加载中…</div>';
   try {
     const r = await fetch('/api/teams');
     const d = await r.json();
-    const teams = (d.teams || []) || [];
-    if (!teams.length) { sel.innerHTML = '<option value="">（暂无团队）</option>'; return; }
-    sel.innerHTML = teams.map(t => '<option value="' + escapeHtml(t.name) + '">' + escapeHtml(t.name) + '（' + t.role_count + ' 位）</option>').join('');
+    teamQuickCache = (d.teams || []) || [];
   } catch (e) {
-    sel.innerHTML = '<option value="">（加载失败）</option>';
+    list.innerHTML = '<div class="team-menu-empty">加载团队失败：' + escapeHtml(e.message) + '</div>';
+    return;
   }
+  if (cnt) cnt.textContent = teamQuickCache.length ? teamQuickCache.length + ' 个' : '';
+  if (!teamQuickCache.length) {
+    list.innerHTML = '<div class="team-menu-empty">还没有团队。可在设置页「团队」新建，或确认项目的 teams/ 目录存在。</div>';
+    return;
+  }
+  list.innerHTML = '';
+  teamQuickCache.forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'team-menu-item' + (selectedTeam && selectedTeam.name === t.name ? ' active' : '');
+    const meta = t.role_count + '位' + (t.stage_count ? ' · ' + t.stage_count + '阶段' : '');
+    b.innerHTML = '<span class="tmi-name">' + escapeHtml(t.name) + '</span>' +
+      '<span class="tmi-tag">' + escapeHtml(teamTypeLabel(t)) + '</span>' +
+      '<span class="tmi-tag">' + escapeHtml(meta) + '</span>';
+    b.title = t.name + (t.source ? '（来自 ' + t.source + (t.source_version ? ' v' + t.source_version : '') + '）' : '');
+    b.onclick = () => selectTeam(t);
+    list.appendChild(b);
+  });
 }
-function runTeamQuickFromChat() {
-  const sel = document.getElementById('teamQuickSelect');
-  const taskEl = document.getElementById('teamQuickTask');
-  if (!sel || !taskEl) return;
-  const team = sel.value;
-  const task = taskEl.value || '';
-  if (!team || team.indexOf('（') === 0) { showToast('请先选择团队', 'error'); return; }
-  if (!task.trim()) { showToast('请填写任务描述', 'error'); return; }
-  toggleTeamQuick();
-  const input = document.getElementById('userInput');
-  input.value = '/team ' + team + ' ' + task.trim();
-  sendMessage();
+function selectTeam(t) {
+  selectedTeam = t;
+  try { localStorage.setItem('ph_last_team', t.name); } catch (e) {}
+  closeTeamMenu();
+  applyTeamMode();
+  const inp = document.getElementById('userInput');
+  if (inp) inp.focus();
+}
+function exitTeamMode() {
+  selectedTeam = null;
+  applyTeamMode();
+}
+// 把「是否处于团队模式」反映到界面上（chip 条 / 输入框提示 / 按钮文案 / 输入框高亮）
+function applyTeamMode() {
+  const bar = document.getElementById('teamModeBar');
+  const row = document.getElementById('chatInputRow');
+  const inp = document.getElementById('userInput');
+  const btn = document.getElementById('sendBtn');
+  const nameEl = document.getElementById('teamModeName');
+  const metaEl = document.getElementById('teamModeMeta');
+  const on = !!selectedTeam;
+  if (row) row.classList.toggle('run-mode', on);
+  if (!on) {
+    if (bar) bar.style.display = 'none';
+    if (inp) inp.placeholder = '输入消息... (Enter 发送, Shift+Enter 换行)';
+    if (btn) btn.textContent = '发送';
+    return;
+  }
+  const t = selectedTeam;
+  if (nameEl) nameEl.textContent = t.name;
+  if (metaEl) {
+    metaEl.textContent = '· ' + teamTypeLabel(t) + ' · ' + t.role_count + ' 位' +
+      (t.stage_count ? ' / ' + t.stage_count + ' 阶段' : '') + (t.builtin ? ' · 内置' : '');
+  }
+  if (bar) bar.style.display = 'flex';
+  if (inp) inp.placeholder = '输入给「' + t.name + '」的任务…（Enter 运行）';
+  if (btn) btn.textContent = '🚀 运行';
 }
 function renderTeamList() {
   const box = document.getElementById('teamList');
   box.innerHTML = '';
   if (!settingsTeams.length) {
-    box.innerHTML = '<span class="setting-hint">暂无团队。点「新建团队」或手动创建 workspace/teams/*.json。</span>';
+    box.innerHTML = '<span class="setting-hint">暂无团队。点上方「新建」按钮，或在 teams/ 手动放入 *.json。</span>';
     return;
   }
   settingsTeams.forEach(t => {
     const b = document.createElement('button');
     b.className = 'btn' + (teamSelectedSlug === t.slug ? ' accent' : '');
-    b.textContent = t.name + '（' + t.role_count + '）';
+    const stages = t.stage_count ? '/' + t.stage_count + '阶段' : '';
+    b.textContent = t.name + '（' + t.role_count + '位' + stages + (t.builtin ? ' · 内置' : '') + '）';
+    b.title = '类型：' + teamTypeLabel(t)
+      + (t.source ? '\n来自外部专家包：' + t.source + (t.source_version ? ' v' + t.source_version : '') : '')
+      + (t.builtin ? '\n（内置团队，保存会覆盖到 workspace/teams/）' : '');
     b.onclick = () => { teamSelectedSlug = t.slug; renderTeamList(); loadTeamFile(); };
     box.appendChild(b);
   });
@@ -2996,8 +3228,35 @@ const TEAM_TEMPLATE = JSON.stringify({
     { name: '市场总监', role: '评审市场/竞争/推广', color: '#ff9f0a', prompt: '你是一位市场总监，评估市场规模、竞争、渠道与推广策略，分点输出。' }
   ]
 }, null, 2);
+const PIPELINE_TEMPLATE = JSON.stringify({
+  name: '研究小队',
+  description: '多阶段：并行调研 → 汇总裁决',
+  type: 'pipeline',
+  final: 'last',
+  stages: [
+    {
+      id: 's1', label: '🔍 并行调研', include_prev: false,
+      task: '任务：{task}\n\n从你负责的角度做一次独立调研，给出结论与依据。',
+      members: [
+        { name: '调研员A', role: '技术视角', color: '#4f8ef7', prompt: '你从技术可行性角度调研并给出结论。' },
+        { name: '调研员B', role: '市场视角', color: '#34c759', prompt: '你从市场与竞争角度调研并给出结论。' }
+      ]
+    },
+    {
+      id: 's2', label: '🎯 汇总裁决',
+      members: [
+        { name: '主编', role: '汇总裁决', color: '#ff9f0a', prompt: '你综合上游所有调研结论，输出一份结构化的最终报告：结论、依据、风险、建议。' }
+      ]
+    }
+  ]
+}, null, 2);
 function newTeam() {
   document.getElementById('team_json').value = TEAM_TEMPLATE;
+  teamSelectedSlug = null; renderTeamList();
+  showTeamError(''); markDirty('teams');
+}
+function newPipelineTeam() {
+  document.getElementById('team_json').value = PIPELINE_TEMPLATE;
   teamSelectedSlug = null; renderTeamList();
   showTeamError(''); markDirty('teams');
 }
@@ -3029,9 +3288,13 @@ async function saveTeam() {
 async function deleteTeam() {
   const slug = teamSelectedSlug || currentTeamSlug();
   if (!slug) { showTeamError('请先选择要删除的团队'); return; }
-  if (!confirm('确定删除团队「' + slug + '」？此操作不可撤销。')) return;
+  const meta = settingsTeams.find(t => t.slug === slug);
+  const extra = (meta && meta.builtin) ? '\n\n注意：这是内置团队（teams/ 下随仓库分发），删除后需重新运行 port_experts.py 或在 Git 里恢复。' : '';
+  if (!confirm('确定删除团队「' + slug + '」？此操作不可撤销。' + extra)) return;
   try {
-    await fetch('/api/teams/' + encodeURIComponent(slug), { method: 'DELETE' });
+    const r = await fetch('/api/teams/' + encodeURIComponent(slug), { method: 'DELETE' });
+    const d = await r.json().catch(() => ({}));
+    if (d.status && d.status !== 'success') { showTeamError('删除失败：团队不存在'); return; }
     teamSelectedSlug = null; document.getElementById('team_json').value = '';
     showTeamError(''); await loadTeams(); showToast('🗑️ 已删除', 'success');
   } catch (e) { showTeamError('删除失败：' + e.message); }

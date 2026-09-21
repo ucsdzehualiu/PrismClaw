@@ -12,9 +12,11 @@
 - **多轮上下文真实累积**：单会话复用同一 Agent 实例，多轮对话上下文持续累积。
 - **人格系统**：通过 `workspace/` 下的 AGENTS / SOUL / USER / IDENTITY 文件定制 Agent 人格，可在界面读取与更新。
 - **会话透明日志**：每轮生成可读 Markdown + 结构化 JSON 快照，落盘到 `session_logs/`。
-- **团队圆桌编排（多智能体）**：一个 lead 把任务分发给多名带独立人格/提示词的成员并行分析，再汇总成最终决策报告。支持 `/team <团队名> <任务>` 魔法命令触发，或界面「🎭 团队」一键运行。内置「投资大师圆桌」（19 位大师 + 风控 + 决策）和「投资圆桌-轻量版」（5 位）两套团队配置，结果自动落盘到 `session_logs/<sid>/teams/run_<时间>/`。
+- **团队编排（多智能体）**：把任务分发给多名带独立人格/提示词的成员，按**阶段**执行后汇总成报告。三种类型：**并行**（成员同时分析 → lead 汇总）、**圆桌**（分析 → 风控 → 决策）、**多阶段 pipeline**（自定义阶段序列，阶段内并行、阶段间传递产出，`final:"last"` 末阶段即交付物 / `final:"lead"` 再由主理人汇总）。点输入框左侧「🎭 团队」选一个团队即可运行（团队菜单是浮层，选中后**复用同一个输入框**填任务，回车即跑），或发 `/team <团队名> <任务>`。项目自带 13 套团队（其中 12 套从外部专家团移植，见 [`PORTING.md`](PORTING.md)），团队配置放 `teams/`（内置）或 `workspace/teams/`（自建，同名覆盖内置），结果落盘到 `session_logs/<sid>/teams/run_<时间>/`。
 
 ## 快速开始
+
+> 📖 **第一次用先看 [`USAGE.md`](USAGE.md)** —— 启动、怎么用团队、怎么跑测试、常见问题，都在那一份里。
 
 ### 1. 配置 LLM
 
@@ -61,10 +63,10 @@ python server.py
                                 │     └─ _acting  (HITL 拦截)
                                 │        (prism_harness_guard.py)
                                 ├─ build_toolkit() 工具包 (tools.py)
-                                ├─ run_team_stream() 团队圆桌编排 (team.py)
-                                │   ├─ 成员并行分析（精简 ReActAgent，无 HITL）
-                                │   ├─ 风控 stage（risk-manager）
-                                │   └─ 决策 stage（portfolio-manager）
+                                ├─ run_team_stream() 团队编排 (team.py)
+                                │   ├─ 并行团队：成员并行分析 → lead 汇总
+                                │   ├─ 圆桌 roundtable：分析 → 风控 → 决策
+                                │   └─ pipeline：按 stages 逐阶段执行（阶段内并行，阶段间传产出）
                                 └─ ContextViz 上下文快照引擎 (context_viz.py)
                                        │              │              │
                                   Session 管理    config.yaml     workspace/
@@ -97,10 +99,23 @@ python server.py
 - `session.py` — 会话管理（`Session` / `SessionManager`），请求队列、HITL 确认队列、超时回收。
 - `server.py` — FastAPI 服务，提供 Web 界面与 SSE 流式对话接口。
 - `index.html` — Web 界面（三栏：对话 / 上下文光谱 / 工具时间线）。
-- `team.py` — 团队圆桌编排（`run_team_stream`），成员并行分析 + 风控 + 决策三阶段，含打断重试与增量落盘。
+- `team.py` — 团队编排（`run_team_stream`）：并行 / 圆桌 / 多阶段 pipeline 三种类型，含打断重试、上下文累积与增量落盘。
+- `port_experts.py` — 移植工具：把 `专家团/` 下外部专家团队生成为 `teams/` + `skills/`（见 [`PORTING.md`](PORTING.md)）。
+- `tests/test_pipeline.py` — 团队编排的确定性回归测试（不调 LLM，验证阶段顺序/并行/上下文传递/容错/落盘）。
+- `tests/test_console_widget.js` — 团队面板渲染的无头回归测试（Node，抽 index.html 的代码段 + DOM 桩，验证面板 HTML）。
+- `tests/test_console_browser.js` — 真实浏览器冒烟（CDP 驱动本机 Chrome/Edge，抓 console 报错并在真 DOM 里验证面板）。加 `PH_LIVE=1` 会真的点「🎭 团队」跑一次（会调模型）。
+
+```bash
+python tests/test_pipeline.py                     # 编排逻辑（免费）
+node tests/test_console_widget.js                 # 面板渲染（免费）
+node tests/test_console_browser.js                # 真实浏览器（免费，需本机有 Chrome/Edge）
+PH_LIVE=1 node tests/test_console_browser.js      # 真实浏览器 + 真跑一次团队（调模型）
+```
 
 ### 工作区
-- `workspace/` — Agent 人格文件（AGENTS / SOUL / USER / IDENTITY）与技能目录（skills/）。
+- `workspace/` — Agent 人格文件（AGENTS / SOUL / USER / IDENTITY）、用户技能目录（skills/）与自建团队（teams/）。
+- `teams/` — 仓库级内置团队配置（随仓库分发，`workspace/teams/` 同名覆盖）。
+- `skills/` — 仓库级共享技能目录（随仓库分发，`workspace/skills/` 同名覆盖）。
 
 ## 核心机制
 

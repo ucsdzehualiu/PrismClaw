@@ -827,8 +827,12 @@ async def ask_user_question(questions: list) -> ToolResponse:
     返回形如：{"answers": [{"id": "pages", "selected": ["3-6 页"]}, ...]}
     一次尽量把需要收集的信息都放在同一个 questions 列表里，减少来回。
     """
-    # 实际由 HITL guard 拦截处理；正常流程不会执行到此处。
-    return ToolResponse(content=[TextBlock(type="text", text="(等待用户回答——由系统弹卡片处理)")])
+    # 实际由 HITL guard 拦截处理（仅主代理有会话）；走到这里说明当前上下文不支持弹卡片，
+    # 比如团队成员/子代理。必须如实告诉模型，否则它会以为已经问过用户了。
+    return ToolResponse(content=[TextBlock(type="text", text=(
+        "（当前上下文无法弹卡片向用户提问：你正运行在团队/子代理里，没有面向用户的交互通道。"
+        "请把你的问题**直接写在这次回答的正文里**交给用户，不要声称已经弹出卡片或正在等待用户选择。）"
+    ))])
 
 
 async def run_subagent(
@@ -880,7 +884,9 @@ async def run_subagent(
     try:
         cfg = load_config()
         model = build_model(cfg, stream=False)
-        toolkit = await build_toolkit(workspace_dir)
+        # 子代理没有面向用户的 HITL 通道：不要给它 ask_user_question，
+        # 否则它会调完以为问过用户了（见 build_toolkit 的 interactive 说明）。
+        toolkit = await build_toolkit(workspace_dir, interactive=False)
     except Exception as e:
         return ToolResponse(content=[TextBlock(type="text", text=f"子代理初始化失败：{e}")])
 
@@ -955,8 +961,17 @@ async def run_team_tool(
 
 # ---- 技能注册 ----
 
-async def build_toolkit(workspace_dir: str = "workspace") -> Toolkit:
-    """构建 Agent 工具包。"""
+async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = True) -> Toolkit:
+    """构建 Agent 工具包。
+
+    interactive: 是否「顶层主代理」（面向用户、有 HITL 会话、可编排）。
+        True  → 注册 ask_user_question（弹卡片）、subagent、run_team。
+        False → 团队成员 / 子代理：它们是执行单元，不注册上述能力。
+                原因有二：
+                1) 没有 HITL 会话，guard 不拦截 ask_user_question，调了只会拿到占位文本，
+                   模型会误以为「已经弹卡片问过用户」（实际卡片从未出现）；
+                2) 允许成员再拉起团队/子代理会造成嵌套编排，成本失控。
+    """
 
     toolkit = Toolkit(
         agent_skill_instruction="""# Skills 使用指南
@@ -1012,7 +1027,9 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
         toolkit.register_tool_function(functools.partial(manage_skill, workspace_dir=workspace_dir))
 
     # 结构化提问（走 HITL 弹卡片，收集页数/受众/风格等）
-    toolkit.register_tool_function(ask_user_question)
+    # 仅主代理注册——团队成员/子代理没有 HITL 通道，注册了反而会误以为已经问过用户。
+    if interactive:
+        toolkit.register_tool_function(ask_user_question)
 
     # 下载 + 从 URL 安装技能（受控文件访问，走 HITL 确认）
     if FLAGS.get("enable_download", True):
@@ -1021,14 +1038,16 @@ Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
         )
 
     # 子代理：委派独立子任务（如 PPT pipeline 的 Eve/Alice/Charlie）
-    if FLAGS.get("enable_subagent", False):
+    # 只有顶层主代理能委派——否则成员/子代理可以无限往下套娃，成本失控。
+    if interactive and FLAGS.get("enable_subagent", False):
         toolkit.register_tool_function(
             functools.partial(run_subagent, workspace_dir=workspace_dir),
             func_name="subagent",
         )
 
     # 团队编排：并行召集多名成员 + lead 汇总成决策报告
-    if FLAGS.get("enable_team", True):
+    # 同样只在顶层开放：团队成员若能再拉起团队，就是嵌套编排（一层团队已经要跑几十分钟）。
+    if interactive and FLAGS.get("enable_team", True):
         toolkit.register_tool_function(
             functools.partial(run_team_tool, workspace_dir=workspace_dir),
             func_name="run_team",

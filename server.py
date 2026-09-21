@@ -183,10 +183,8 @@ async def post_team(slug: str, request: Request):
 async def delete_team(slug: str):
     import team as team_mod
     slug = _safe_team_slug(slug)
-    path = os.path.join(team_mod.get_teams_dir(WORKSPACE_DIR), slug + ".json")
-    if os.path.isfile(path):
-        os.remove(path)
-    return {"status": "success"}
+    removed = team_mod.delete_team(slug, WORKSPACE_DIR)
+    return {"status": "success" if removed else "not_found"}
 
 
 @app.get("/api/config")

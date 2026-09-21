@@ -508,7 +508,12 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
                 return True, "团队编排功能已关闭（可在「功能开关」中开启）。"
             spec = team_mod.load_team(team_name, "workspace")
             if not spec:
-                return True, f"找不到团队「{team_name}」。可在设置页「团队」创建，或检查 workspace/teams/{team_name}.json。"
+                names = "、".join(t["name"] for t in team_mod.list_teams("workspace")[:20])
+                return True, (
+                    f"找不到团队「{team_name}」。\n"
+                    f"可用团队：{names or '（暂无）'}\n"
+                    "可点输入框上方「🎭 团队」按钮一键运行，或在设置页「团队」里新建。"
+                )
         except Exception as e:
             return True, f"读取团队失败：{e}"
         request.team_run = (team_name, task)  # 交给 agent_runner 真正执行
@@ -670,12 +675,13 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         return
                     await response_q.put({"type": "team", **ev})
 
-                # 圆桌（19 位多阶段）需要更长的整轮预算 + 受限并发，避免成员超时中断
-                is_roundtable = team_spec.get("type") == "roundtable"
+                # 圆桌（19 位多阶段）/ 多阶段管线 需要更长的整轮预算 + 受限并发，
+                # 避免成员超时中断；普通并行团队用较短预算即可。
+                is_multi_stage = team_spec.get("type") in ("roundtable", "pipeline")
                 team_timeout = float(cfg.get("agent", {}).get(
-                    "roundtable_timeout", 1800 if is_roundtable else 600,
+                    "roundtable_timeout", 1800 if is_multi_stage else 600,
                 ))
-                member_timeout = 600.0 if is_roundtable else 300.0
+                member_timeout = 600.0 if is_multi_stage else 300.0
                 max_concurrent = int(cfg.get("agent", {}).get("team_max_concurrent", 4))
 
                 async def run_team_and_emit():
@@ -689,6 +695,12 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         member_timeout=member_timeout,
                         max_concurrent=max_concurrent,
                     )
+                    # 兜底：Agentscope 的「被打断」预设文案绝不允许当交付物递出去。
+                    # 各条路径内部已各自降级，这里只防漏网。
+                    if team_mod.is_interrupted_output(report):
+                        report = ("⚠️ 本次编排被中断（模型端在工具执行中被 cancel），未能产出最终报告。\n"
+                                  "建议检查模型端点稳定性后重新运行；本次各成员的中间产出已落盘在 "
+                                  "session_logs 对应目录下。")
                     # 把最终报告作为正常 assistant 文本并入主对话
                     await response_q.put({
                         "msg_id": "team-report",
@@ -696,19 +708,30 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
                         "contents": [{"type": "text", "content": report}],
                     })
 
+                # 注册到 request.stream_task，让「停止」按钮 / /stop 能真正取消整轮编排
+                # （否则只是把 canceled 置真、事件不再发出，后台仍在空跑烧 token）。
+                team_run_task = asyncio.create_task(run_team_and_emit())
+                request.stream_task = team_run_task
                 try:
-                    await asyncio.wait_for(run_team_and_emit(), timeout=team_timeout)
+                    await asyncio.wait_for(team_run_task, timeout=team_timeout)
                     if request.canceled:
                         await response_q.put({"cancel": True, "last": True, "contents": []})
                     else:
                         await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
                         await response_q.put(None)
                 except asyncio.TimeoutError:
+                    team_run_task.cancel()
                     await response_q.put({
                         "type": "status", "phase": "error",
                         "detail": f"团队运行超时（>{team_timeout:.0f}s），已终止。",
                     })
                     await response_q.put({"error": "team timeout", "last": True, "contents": []})
+                except asyncio.CancelledError:
+                    # /stop 会先置 request.canceled 再 cancel 任务：这属于用户主动中断，
+                    # 正常收尾即可，绝不能向上抛——否则会把整个会话循环一起取消掉。
+                    if not request.canceled:
+                        raise
+                    await response_q.put({"cancel": True, "last": True, "contents": []})
             except asyncio.CancelledError:
                 raise
             except Exception as e:
