@@ -17,14 +17,18 @@ from datetime import datetime
 from typing import List
 
 from bs4 import BeautifulSoup
-from agentscope.tool import Toolkit, ToolResponse
 from agentscope.tool import (
-    insert_text_file,
-    view_text_file,
-    write_text_file,
+    AskUser,
+    FunctionTool,
+    ToolBase,
+    ToolChunk,
+    Toolkit,
 )
-from agentscope.message import Msg, TextBlock
-from agentscope.model import OpenAIChatModel
+from agentscope.message import Msg, TextBlock, UserMsg
+from agentscope.permission import (
+    PermissionBehavior,
+    PermissionDecision,
+)
 
 from conf import FLAGS
 
@@ -39,7 +43,87 @@ from conf import FLAGS
 _GIT_BASH = r"C:\Program Files\Git\bin\bash.exe"
 
 
-async def run_shell(command: str, timeout: int = 120, shell: str = "powershell") -> ToolResponse:
+# ---- 文本文件工具（自实现，保持 PrismHarness 既有工具名与语义）----
+# AgentScope 2.0 不再提供 view_text_file / write_text_file / insert_text_file，
+# 自带的 Read / Write / Edit 名字与语义都不同。这里自实现这三个工具，让
+# system prompt、GUARD 工具名单、前端确认卡片继续沿用既有工具名。
+
+async def view_text_file(file_path: str, ranges: str = "") -> ToolChunk:
+    """查看一个文本文件的内容（只读）。
+
+    Args:
+        file_path: 文件路径（相对项目根或绝对路径）
+        ranges: 可选，查看的行范围，如 "1-50"。留空则查看全文。
+    """
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        return ToolChunk(content=[TextBlock(text=f"错误：文件不存在：{file_path}")])
+    except Exception as e:
+        return ToolChunk(content=[TextBlock(text=f"读取失败：{e}")])
+
+    if ranges and "-" in ranges:
+        try:
+            a, b = ranges.split("-", 1)
+            start, end = max(1, int(a)), int(b)
+            body = "".join(lines[start - 1:end])
+            head = f"[{file_path} 第 {start}-{end} 行，共 {len(lines)} 行]\n"
+            return ToolChunk(content=[TextBlock(text=head + body)])
+        except Exception:
+            pass
+    text = "".join(lines)
+    if len(text) > 20000:
+        text = text[:20000] + "\n...(已截断)"
+    return ToolChunk(content=[TextBlock(text=text)])
+
+
+async def write_text_file(file_path: str, content: str) -> ToolChunk:
+    """把内容写入一个文本文件（覆盖已有内容；受确认保护）。
+
+    Args:
+        file_path: 目标文件路径
+        content: 要写入的完整文本内容
+    """
+    try:
+        parent = os.path.dirname(os.path.abspath(file_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.write(content or "")
+        return ToolChunk(content=[TextBlock(text=f"✅ 已写入 {file_path}（{len(content or '')} 字符）。")])
+    except Exception as e:
+        return ToolChunk(content=[TextBlock(text=f"写入失败：{e}")])
+
+
+async def insert_text_file(file_path: str, content: str, line: int = 0) -> ToolChunk:
+    """在文本文件的指定行插入内容（不覆盖原有内容；受确认保护）。
+
+    Args:
+        file_path: 目标文件路径（不存在则新建）
+        content: 要插入的文本
+        line: 插入到第几行之后（0 表示文件开头）
+    """
+    try:
+        if os.path.exists(file_path):
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+        else:
+            lines = []
+        idx = max(0, min(int(line or 0), len(lines)))
+        ins = content if (content or "").endswith("\n") else (content or "") + "\n"
+        lines.insert(idx, ins)
+        parent = os.path.dirname(os.path.abspath(file_path))
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        return ToolChunk(content=[TextBlock(text=f"✅ 已在 {file_path} 第 {idx} 行后插入内容。")])
+    except Exception as e:
+        return ToolChunk(content=[TextBlock(text=f"插入失败：{e}")])
+
+
+async def run_shell(command: str, timeout: int = 120, shell: str = "powershell") -> ToolChunk:
     """执行一条命令并返回 returncode / stdout / stderr。
 
     运行环境是 Windows。默认走 **PowerShell**；安装脚本等 bash 内容用 shell="bash"（Git Bash）。
@@ -51,7 +135,7 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
     """
     command = (command or "").strip()
     if not command:
-        return ToolResponse(content=[TextBlock(type="text", text="错误：命令为空，不要调用空命令。")])
+        return ToolChunk(content=[TextBlock(text="错误：命令为空，不要调用空命令。")])
 
     shell = (shell or "powershell").strip().lower()
 
@@ -71,7 +155,7 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
 
     if shell == "bash":
         if not os.path.isfile(_GIT_BASH):
-            return ToolResponse(content=[TextBlock(type="text", text=(
+            return ToolChunk(content=[TextBlock(text=(
                 f"错误：找不到 Git Bash（{_GIT_BASH}）。本机未安装 Git for Windows，无法执行 bash 脚本。"
             ))])
         argv = [_GIT_BASH, "-lc", command]
@@ -85,7 +169,7 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
             stderr=asyncio.subprocess.PIPE,
         )
     except FileNotFoundError:
-        return ToolResponse(content=[TextBlock(type="text", text=f"错误：找不到解释器：{argv[0]}。")])
+        return ToolChunk(content=[TextBlock(text=f"错误：找不到解释器：{argv[0]}。")])
 
     try:
         # 直接 communicate() 会同时消费 stdout/stderr，避免大输出把管道写满后
@@ -125,7 +209,7 @@ async def run_shell(command: str, timeout: int = 120, shell: str = "powershell")
         f"<stderr>{stderr_str}</stderr>"
         f"{_repeat_note}"
     )
-    return ToolResponse(content=[TextBlock(type="text", text=text)])
+    return ToolChunk(content=[TextBlock(text=text)])
 
 # ---- Prompt 模板 ----
 
@@ -402,7 +486,7 @@ def _note_repeat(tool_name: str, param_key: str) -> str:
     return ""
 
 
-async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
+async def web_fetch(url: str, max_chars: int = 6000) -> ToolChunk:
     """抓取一个网页，返回正文文本（HTML 转纯文本，国内可直连）。
 
     用于读取文章、文档、API 返回等任意 http/https 页面。
@@ -416,7 +500,7 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
 
     url = (url or "").strip()
     if not url or not url.startswith(("http://", "https://")):
-        return ToolResponse(content=[TextBlock(type="text", text="错误：请提供合法的 http/https 网址。")])
+        return ToolChunk(content=[TextBlock(text="错误：请提供合法的 http/https 网址。")])
 
     # 软提示：记录重复调用，但不阻止执行
     _repeat_note = _note_repeat("web_fetch", url)
@@ -438,12 +522,12 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
                         readme_text = base64.b64decode(data.get("content", "")).decode("utf-8", errors="ignore")
                         if len(readme_text) > max_chars:
                             readme_text = readme_text[:max_chars] + f"\n\n...(已截断)"
-                        return ToolResponse(content=[TextBlock(type="text", text=(
+                        return ToolChunk(content=[TextBlock(text=(
                             f"来源（GitHub API - {owner}/{repo} README）：\n\n{readme_text}{_repeat_note}"
                         ))])
-                    return ToolResponse(content=[TextBlock(type="text", text=f"GitHub API 返回 HTTP {resp.status}。{_repeat_note}")])
+                    return ToolChunk(content=[TextBlock(text=f"GitHub API 返回 HTTP {resp.status}。{_repeat_note}")])
         except Exception as e:
-            return ToolResponse(content=[TextBlock(type="text", text=f"GitHub API 请求失败：{e}")])
+            return ToolChunk(content=[TextBlock(text=f"GitHub API 请求失败：{e}")])
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -452,16 +536,16 @@ async def web_fetch(url: str, max_chars: int = 6000) -> ToolResponse:
                 timeout=aiohttp.ClientTimeout(total=15),
             ) as resp:
                 if resp.status != 200:
-                    return ToolResponse(content=[TextBlock(type="text", text=f"抓取失败：HTTP {resp.status}")])
+                    return ToolChunk(content=[TextBlock(text=f"抓取失败：HTTP {resp.status}")])
                 raw = await resp.text(errors="ignore")
         text = _html_to_text(raw)
         if len(text) > max_chars:
             text = text[:max_chars] + f"\n\n...(已截断，原文共 {len(text)} 字)"
-        return ToolResponse(content=[TextBlock(type="text", text=(
+        return ToolChunk(content=[TextBlock(text=(
             f"来源：{url}\n\n{text}{_repeat_note}" if text else f"来源：{url}\n\n（页面无可见正文）{_repeat_note}"
         ))])
     except Exception as e:
-        return ToolResponse(content=[TextBlock(type="text", text=f"抓取出错：{e}")])
+        return ToolChunk(content=[TextBlock(text=f"抓取出错：{e}")])
 
 
 # ---- Bing 联网搜索（国内可直连）----
@@ -561,10 +645,10 @@ async def _bing_cn_search(query: str) -> str:
 
 
 async def _llm_fallback(query: str) -> str:
-    """兜底：用 LLM 基于常识回答（流式累积已修复，仅取最后完整文本）。"""
+    """兜底：用 LLM 基于常识回答。"""
     from model_config import build_model, load_config
 
-    model = build_model(load_config(), stream=True)
+    model = build_model(load_config(), stream=False)
     now = datetime.now()
     weekday_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
     current_time = now.strftime(f"%Y年%m月%d日 {weekday_map[now.weekday()]} %H:%M")
@@ -573,16 +657,15 @@ async def _llm_fallback(query: str) -> str:
         f"请基于你的知识简洁回答（不知道就直说不知道，不要编造精确数字）：{query}\n"
         f"回答不超过80字。"
     )
-    response = await model([{"role": "user", "content": prompt}])
-    last_text = ""
-    async for chunk in response:
-        t = _extract_text_from_chunk(chunk.content)
-        if t:
-            last_text = t  # 累计全文，最后一个 chunk 即完整内容
-    return last_text.strip() or "（未能获取相关信息）"
+    # AgentScope 2.0：模型用 list[Msg] 调用，返回 ChatResponse（stream=False 时为完整结果）
+    response = await model([UserMsg(name="user", content=prompt)])
+    text = "".join(
+        b.text for b in response.content if isinstance(b, TextBlock)
+    )
+    return text.strip() or "（未能获取相关信息）"
 
 
-async def web_search(query: str) -> ToolResponse:
+async def web_search(query: str) -> ToolChunk:
     """联网搜索 / 实时数据获取（国内可用，不走 DuckDuckGo）。
 
     - 天气类 → 直连天气 API 获取真实数据
@@ -594,7 +677,7 @@ async def web_search(query: str) -> ToolResponse:
     """
     query = (query or "").strip()
     if not query:
-        return ToolResponse(content=[TextBlock(type="text", text="错误：搜索词为空。")])
+        return ToolChunk(content=[TextBlock(text="错误：搜索词为空。")])
 
     # 软提示：记录重复调用，但不阻止执行
     _repeat_note = _note_repeat("web_search", query)
@@ -605,16 +688,16 @@ async def web_search(query: str) -> ToolResponse:
         if city:
             weather = await _fetch_weather(city)
             if weather:
-                return ToolResponse(content=[TextBlock(type="text", text=weather + _repeat_note)])
+                return ToolChunk(content=[TextBlock(text=weather + _repeat_note)])
 
     # 2) 通用搜索 → 必应中国（国内可直连）
     results = await _bing_cn_search(query)
     if results:
-        return ToolResponse(content=[TextBlock(type="text", text=results + _repeat_note)])
+        return ToolChunk(content=[TextBlock(text=results + _repeat_note)])
 
     # 3) 兜底：LLM 常识
     answer = await _llm_fallback(query)
-    return ToolResponse(content=[TextBlock(type="text", text=answer + _repeat_note)])
+    return ToolChunk(content=[TextBlock(text=answer + _repeat_note)])
 
 
 # ---- 技能安装边界说明（诚实告知，不假装能装市场技能） ----
@@ -654,7 +737,7 @@ async def manage_skill(
     description: str = "",
     content: str = "",
     workspace_dir: str = "workspace",
-) -> ToolResponse:
+) -> ToolChunk:
     """技能管理工具（PrismHarness 原生，用于化解"装 skill"类未知请求）。
 
     支持三种动作：
@@ -673,7 +756,7 @@ async def manage_skill(
 
     if action == "list":
         if not os.path.isdir(skills_dir):
-            return ToolResponse(content=[TextBlock(type="text", text="当前没有已安装的本地技能。")])
+            return ToolChunk(content=[TextBlock(text="当前没有已安装的本地技能。")])
             return
         items = []
         for d in sorted(os.listdir(skills_dir)):
@@ -681,23 +764,23 @@ async def manage_skill(
             if os.path.isdir(p) and os.path.isfile(os.path.join(p, "SKILL.md")):
                 items.append(f"- {d}")
         if items:
-            return ToolResponse(content=[TextBlock(type="text", text=(
+            return ToolChunk(content=[TextBlock(text=(
                 "已安装的本地技能：\n" + "\n".join(items)
             ))])
         else:
-            return ToolResponse(content=[TextBlock(type="text", text="workspace/skills 下暂无技能目录。")])
+            return ToolChunk(content=[TextBlock(text="workspace/skills 下暂无技能目录。")])
         return
 
     if action == "info":
-        return ToolResponse(content=[TextBlock(type="text", text=SKILL_INSTALL_INFO)])
+        return ToolChunk(content=[TextBlock(text=SKILL_INSTALL_INFO)])
         return
 
     if action == "create":
         if not name:
-            return ToolResponse(content=[TextBlock(type="text", text="错误：create 动作需要提供 name（技能名，仅英文/数字/下划线/连字符）。")])
+            return ToolChunk(content=[TextBlock(text="错误：create 动作需要提供 name（技能名，仅英文/数字/下划线/连字符）。")])
             return
         if not re.match(r"^[a-zA-Z0-9_-]+$", name):
-            return ToolResponse(content=[TextBlock(type="text", text="错误：技能名只能包含字母、数字、下划线和连字符。")])
+            return ToolChunk(content=[TextBlock(text="错误：技能名只能包含字母、数字、下划线和连字符。")])
             return
         target = os.path.join(skills_dir, name)
         os.makedirs(target, exist_ok=True)
@@ -707,22 +790,22 @@ async def manage_skill(
         try:
             with open(skill_md, "w", encoding="utf-8") as f:
                 f.write(content)
-            return ToolResponse(content=[TextBlock(type="text", text=(
+            return ToolChunk(content=[TextBlock(text=(
                 f"✅ 已在 {skill_md} 创建技能「{name}」。\n"
                 "下次对话该技能会被自动加载到 System Prompt（无需重启 server）。"
             ))])
         except Exception as e:
-            return ToolResponse(content=[TextBlock(type="text", text=f"创建技能失败：{e}")])
+            return ToolChunk(content=[TextBlock(text=f"创建技能失败：{e}")])
         return
 
-    return ToolResponse(content=[TextBlock(type="text", text=f"未知 action: {action}。支持 list / create / info。")])
+    return ToolChunk(content=[TextBlock(text=f"未知 action: {action}。支持 list / create / info。")])
 
 
 async def download_file(
     url: str,
     save_name: str = "",
     workspace_dir: str = "workspace",
-) -> ToolResponse:
+) -> ToolChunk:
     """下载一个文件到工作区 workspace/downloads/ 目录（受 HITL 确认保护）。
 
     用于从网络获取资源（如图片、文档、技能文件等）。
@@ -736,7 +819,7 @@ async def download_file(
 
     url = (url or "").strip()
     if not url or not url.startswith(("http://", "https://")):
-        return ToolResponse(content=[TextBlock(type="text", text="错误：请提供合法的 http/https 下载地址。")])
+        return ToolChunk(content=[TextBlock(text="错误：请提供合法的 http/https 下载地址。")])
         return
 
     # 推断文件名
@@ -748,7 +831,7 @@ async def download_file(
     os.makedirs(save_dir, exist_ok=True)
     save_path = os.path.join(save_dir, save_name)
     if os.path.exists(save_path):
-        return ToolResponse(content=[TextBlock(type="text", text=f"文件已存在：{save_path}（未覆盖）。")])
+        return ToolChunk(content=[TextBlock(text=f"文件已存在：{save_path}（未覆盖）。")])
         return
 
     try:
@@ -757,14 +840,14 @@ async def download_file(
                 url, headers={"User-Agent": "Mozilla/5.0"}, timeout=aiohttp.ClientTimeout(total=30)
             ) as resp:
                 if resp.status != 200:
-                    return ToolResponse(content=[TextBlock(type="text", text=f"下载失败：HTTP {resp.status}。")])
+                    return ToolChunk(content=[TextBlock(text=f"下载失败：HTTP {resp.status}。")])
                     return
                 size = 0
                 with open(save_path, "wb") as f:
                     async for chunk in resp.content.iter_chunked(8192):
                         f.write(chunk)
                         size += len(chunk)
-                return ToolResponse(content=[TextBlock(type="text", text=(
+                return ToolChunk(content=[TextBlock(text=(
                     f"✅ 已下载到 {save_path}（{size} 字节）。"
                 ))])
     except Exception as e:
@@ -773,7 +856,7 @@ async def download_file(
             os.remove(save_path)
         except Exception:
             pass
-        return ToolResponse(content=[TextBlock(type="text", text=f"下载出错：{e}")])
+        return ToolChunk(content=[TextBlock(text=f"下载出错：{e}")])
 
 
 # install_skill_from_url 已删除——用户反馈"思路不对"。
@@ -815,7 +898,7 @@ def _resolve_skill_md(workspace_dir: str, skill: str):
     return None
 
 
-async def ask_user_question(questions: list) -> ToolResponse:
+async def ask_user_question(questions: list) -> ToolChunk:
     """向用户提问并等待用户选择（用于收集主题、页数、受众、目的、风格等需求）。
 
     该工具会暂停并弹出选择题卡片，用户选择后以结构化结果返回。
@@ -829,7 +912,7 @@ async def ask_user_question(questions: list) -> ToolResponse:
     """
     # 实际由 HITL guard 拦截处理（仅主代理有会话）；走到这里说明当前上下文不支持弹卡片，
     # 比如团队成员/子代理。必须如实告诉模型，否则它会以为已经问过用户了。
-    return ToolResponse(content=[TextBlock(type="text", text=(
+    return ToolChunk(content=[TextBlock(text=(
         "（当前上下文无法弹卡片向用户提问：你正运行在团队/子代理里，没有面向用户的交互通道。"
         "请把你的问题**直接写在这次回答的正文里**交给用户，不要声称已经弹出卡片或正在等待用户选择。）"
     ))])
@@ -841,7 +924,7 @@ async def run_subagent(
     workspace_dir: str = "workspace",
     max_iters: int = 30,
     timeout: int = 600,
-) -> ToolResponse:
+) -> ToolChunk:
     """创建一个全新的子代理，独立完成一个自包含子任务，并返回它的最终文字输出。
 
     子代理拥有独立上下文和与主代理相同的工具集（文件读写/Shell/搜索/下载等），
@@ -854,15 +937,12 @@ async def run_subagent(
         max_iters: 子代理 ReAct 最大迭代数（默认 30）。
         timeout: 子代理整体超时秒数（默认 600）。
     """
-    from agentscope.agent import ReActAgent
-    from agentscope.formatter import OpenAIChatFormatter
-    from agentscope.memory import InMemoryMemory
-    from agentscope.message import Msg
+    from agentscope.agent import Agent, ReActConfig
     from model_config import build_model, load_config
 
     prompt = (prompt or "").strip()
     if not prompt:
-        return ToolResponse(content=[TextBlock(type="text", text="错误：subagent 的 prompt 不能为空。")])
+        return ToolChunk(content=[TextBlock(text="错误：subagent 的 prompt 不能为空。")])
 
     sys_prompt = (
         "你是主代理派出的子代理，独立完成一个自包含子任务。\n"
@@ -888,42 +968,38 @@ async def run_subagent(
         # 否则它会调完以为问过用户了（见 build_toolkit 的 interactive 说明）。
         toolkit = await build_toolkit(workspace_dir, interactive=False)
     except Exception as e:
-        return ToolResponse(content=[TextBlock(type="text", text=f"子代理初始化失败：{e}")])
+        return ToolChunk(content=[TextBlock(text=f"子代理初始化失败：{e}")])
 
-    sub = ReActAgent(
+    sub = Agent(
         name="subagent",
-        sys_prompt=sys_prompt,
+        system_prompt=sys_prompt,
         model=model,
-        formatter=OpenAIChatFormatter(),
         toolkit=toolkit,
-        memory=InMemoryMemory(),
-        max_iters=int(max_iters or 30),
-        parallel_tool_calls=bool(cfg.get("agent", {}).get("parallel_tool_calls", False)),
+        react_config=ReActConfig(max_iters=int(max_iters or 30)),
     )
-    sub.set_console_output_enabled(False)
 
     try:
         reply = await asyncio.wait_for(
-            sub(Msg("user", prompt, "user")),
+            sub.reply(UserMsg(name="user", content=prompt)),
             timeout=float(timeout),
         )
         text = reply.get_text_content()
         if not text:
             text = "(子代理已完成，但没有文本输出。)"
-        return ToolResponse(content=[TextBlock(type="text", text=text)])
+        return ToolChunk(content=[TextBlock(text=text)])
     except asyncio.TimeoutError:
-        return ToolResponse(content=[TextBlock(type="text", text=f"子代理超时（>{timeout}s），已强制终止。")])
+        return ToolChunk(content=[TextBlock(text=f"子代理超时（>{timeout}s），已强制终止。")])
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        return ToolResponse(content=[TextBlock(type="text", text=f"子代理执行出错：{e}")])
+        return ToolChunk(content=[TextBlock(text=f"子代理执行出错：{e}")])
 
 
 async def run_team_tool(
     team_name: str,
     task: str,
     workspace_dir: str = "workspace",
-) -> ToolResponse:
+) -> ToolChunk:
     """触发一次「团队编排」：并行召集团队成员各自分析同一任务，lead 汇总成决策报告。
 
     团队由 `workspace/teams/<名称>.json` 定义（可在设置页「团队」面板或手动编辑），
@@ -938,9 +1014,9 @@ async def run_team_tool(
 
     team = team_mod.load_team(team_name, workspace_dir)
     if not team:
-        return ToolResponse(content=[TextBlock(type="text", text=f"找不到团队「{team_name}」。请先在设置页创建，团队成员需含 name/prompt。")])
+        return ToolChunk(content=[TextBlock(text=f"找不到团队「{team_name}」。请先在设置页创建，团队成员需含 name/prompt。")])
     if not (task or "").strip():
-        return ToolResponse(content=[TextBlock(type="text", text="错误：task 不能为空。")])
+        return ToolChunk(content=[TextBlock(text="错误：task 不能为空。")])
     try:
         from model_config import load_config
         cfg = load_config()
@@ -952,105 +1028,149 @@ async def run_team_tool(
             workspace_dir=workspace_dir,
             run_dir=None,
         )
-        return ToolResponse(content=[TextBlock(type="text", text=report)])
+        return ToolChunk(content=[TextBlock(text=report)])
     except asyncio.CancelledError:
         raise
     except Exception as e:
-        return ToolResponse(content=[TextBlock(type="text", text=f"团队运行出错：{e}")])
+        return ToolChunk(content=[TextBlock(text=f"团队运行出错：{e}")])
 
 
-# ---- 技能注册 ----
+# ---- 工具包构建（AgentScope 2.0） ----
+
+class PrismAskUser(AskUser):
+    """2.0 内置 AskUser 的改名版：沿用 PrismHarness 既有的 `ask_user_question`
+    工具名，前端与 system prompt 无需改动。外部工具，走 RequireExternalExecutionEvent。
+    """
+
+    name = "ask_user_question"
+
 
 async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = True) -> Toolkit:
-    """构建 Agent 工具包。
+    """构建 AgentScope 2.0 Toolkit。
 
-    interactive: 是否「顶层主代理」（面向用户、有 HITL 会话、可编排）。
+    interactive: 是否「顶层主代理」（面向用户、可编排）。
         True  → 注册 ask_user_question（弹卡片）、subagent、run_team。
         False → 团队成员 / 子代理：它们是执行单元，不注册上述能力。
                 原因有二：
-                1) 没有 HITL 会话，guard 不拦截 ask_user_question，调了只会拿到占位文本，
-                   模型会误以为「已经弹卡片问过用户」（实际卡片从未出现）；
+                1) 没有面向用户的交互通道，注册了会让模型误以为已经问过用户；
                 2) 允许成员再拉起团队/子代理会造成嵌套编排，成本失控。
+
+    受确认保护的工具不再靠 GUARD 名单拦截，而是在注册时打
+    `PermissionDecision(behavior=ASK)`——2.0 权限引擎会在执行前弹出确认。
+    只读工具标 `is_read_only=True`，引擎自动放行、不打扰用户。
     """
+    # ── 技能目录：workspace/skills 优先，仓库根 skills 兜底（同名 workspace 覆盖）──
+    skill_dirs: list[str] = []
+    seen: set[str] = set()
+    for base in (os.path.join(workspace_dir, "skills"), "skills"):
+        if not os.path.isdir(base):
+            continue
+        for skill_name in sorted(os.listdir(base)):
+            d = os.path.join(base, skill_name)
+            if (
+                os.path.isdir(d)
+                and os.path.isfile(os.path.join(d, "SKILL.md"))
+                and skill_name not in seen
+            ):
+                seen.add(skill_name)
+                skill_dirs.append(d)
 
-    toolkit = Toolkit(
-        agent_skill_instruction="""# Skills 使用指南
+    tools: list[ToolBase] = []
 
-Skills 是预定义的 SOP 流程，存放在 `workspace/skills/` 目录下。
+    def _add(func, *, name: str = None, read_only: bool = False, ask: bool = False, allow: bool = False):
+        kw = {"name": name or func.__name__, "is_read_only": read_only}
+        if ask:
+            kw["is_read_only"] = False
+            kw["permission"] = PermissionDecision(
+                behavior=PermissionBehavior.ASK,
+                message=f"工具 {kw['name']} 需要用户确认后才能执行。",
+            )
+        elif allow:
+            kw["permission"] = PermissionDecision(
+                behavior=PermissionBehavior.ALLOW,
+                message=f"工具 {kw['name']} 无需确认。",
+            )
+        tools.append(FunctionTool(func, **kw))
 
-## 使用流程
-1. 根据 skill 的 name/description 判断是否需要使用
-2. 使用 view_text_file 读取 skill 目录下的 SKILL.md 了解详细指令
-3. 按照 SKILL.md 的流程执行具体步骤
-
-## 重要
-- Skill 不是 tool，是流程指南
-- 具体操作需要通过 tool 完成
-- 每个 skill 有独立目录，包含 SKILL.md 和相关文件
-""",
-        agent_skill_template="- name: {name}  dir: {dir}  desc: {description}",
-    )
-
-    # 注册技能（L1 元数据）——先 workspace（用户自定义），再仓库根 skills（共享技能）
-    # 同名时 workspace 优先（覆盖仓库级）
-    def _register_skills_from(dir_path):
-        if not os.path.isdir(dir_path):
-            return
-        for skill_name in os.listdir(dir_path):
-            skill_path = os.path.join(dir_path, skill_name)
-            if os.path.isdir(skill_path):
-                try:
-                    toolkit.register_agent_skill(skill_path)
-                except Exception:
-                    pass
-
-    _register_skills_from(os.path.join(workspace_dir, "skills"))
-    _register_skills_from("skills")
-
-    # 注册内置工具
+    # ── 文件操作 ──
     if FLAGS.get("enable_view_text_file", True):
-        toolkit.register_tool_function(view_text_file)
+        _add(view_text_file, read_only=True)
     if FLAGS.get("enable_write_text_file", True):
-        toolkit.register_tool_function(write_text_file)
+        _add(write_text_file, ask=True)
     if FLAGS.get("enable_insert_text_file", True):
-        toolkit.register_tool_function(insert_text_file)
+        _add(insert_text_file, ask=True)
+
+    # ── Shell（受确认保护）──
     if FLAGS.get("enable_execute_shell_command", True):
-        toolkit.register_tool_function(run_shell)
+        _add(run_shell, ask=True)
 
-    # Web 搜索（必应中国，国内可用）+ 网页抓取
+    # ── Web 搜索（必应中国，国内可用）+ 网页抓取（只读）──
     if FLAGS.get("enable_websearch", True):
-        toolkit.register_tool_function(web_search)
-        toolkit.register_tool_function(web_fetch)
+        _add(web_search, read_only=True)
+        _add(web_fetch, read_only=True)
 
-    # 技能管理（化解"装 skill"类未知请求；list/create/info 均为安全动作，不走 HITL 确认）
+    # ── 技能管理（本地管理，安全动作，不走确认）──
     if FLAGS.get("enable_skills", True):
-        toolkit.register_tool_function(functools.partial(manage_skill, workspace_dir=workspace_dir))
+        async def manage_skill_tool(
+            action: str, name: str = "", description: str = "", content: str = ""
+        ) -> ToolChunk:
+            """技能管理工具（列出 / 新建 / 说明本地技能）。
 
-    # 结构化提问（走 HITL 弹卡片，收集页数/受众/风格等）
-    # 仅主代理注册——团队成员/子代理没有 HITL 通道，注册了反而会误以为已经问过用户。
-    if interactive:
-        toolkit.register_tool_function(ask_user_question)
+            Args:
+                action: 动作，取值 list | create | info
+                name: 技能名（create 时必填，仅英文/数字/下划线/连字符）
+                description: 技能一句话描述（create 时建议填写）
+                content: 技能正文（create 时的 SKILL.md 内容；留空按模板生成）
+            """
+            return await manage_skill(action, name, description, content, workspace_dir=workspace_dir)
 
-    # 下载 + 从 URL 安装技能（受控文件访问，走 HITL 确认）
+        _add(manage_skill_tool, name="manage_skill", read_only=True)
+
+    # ── 下载文件（受确认保护）──
     if FLAGS.get("enable_download", True):
-        toolkit.register_tool_function(
-            functools.partial(download_file, workspace_dir=workspace_dir),
-        )
+        async def download_file_tool(url: str, save_name: str = "") -> ToolChunk:
+            """下载一个文件到工作区 workspace/downloads/（受确认保护）。
 
-    # 子代理：委派独立子任务（如 PPT pipeline 的 Eve/Alice/Charlie）
-    # 只有顶层主代理能委派——否则成员/子代理可以无限往下套娃，成本失控。
+            Args:
+                url: 文件下载地址（http/https）
+                save_name: 保存文件名（留空则从 URL 推断）
+            """
+            return await download_file(url, save_name, workspace_dir=workspace_dir)
+
+        _add(download_file_tool, name="download_file", ask=True)
+
+    # ── 结构化提问（仅主代理；2.0 内置 AskUser，走外部执行通道弹卡片）──
+    if interactive:
+        tools.append(PrismAskUser())
+
+    # ── 子代理：委派独立子任务（仅主代理，防嵌套套娃）──
     if interactive and FLAGS.get("enable_subagent", False):
-        toolkit.register_tool_function(
-            functools.partial(run_subagent, workspace_dir=workspace_dir),
-            func_name="subagent",
-        )
+        async def subagent_tool(
+            prompt: str, skill: str = "", max_iters: int = 30, timeout: int = 600
+        ) -> ToolChunk:
+            """创建独立子代理完成一个自包含子任务，返回其最终文字输出。
 
-    # 团队编排：并行召集多名成员 + lead 汇总成决策报告
-    # 同样只在顶层开放：团队成员若能再拉起团队，就是嵌套编排（一层团队已经要跑几十分钟）。
+            Args:
+                prompt: 给子代理的完整任务描述（需自包含，含所需路径/素材/约束）
+                skill: 可选，作为子代理系统提示加载的技能（SKILL.md 路径或技能目录名）
+                max_iters: 子代理最大迭代数（默认 30）
+                timeout: 子代理整体超时秒数（默认 600）
+            """
+            return await run_subagent(prompt, skill, workspace_dir, max_iters, timeout)
+
+        _add(subagent_tool, name="subagent", allow=True)
+
+    # ── 团队编排（仅主代理，防嵌套）──
     if interactive and FLAGS.get("enable_team", True):
-        toolkit.register_tool_function(
-            functools.partial(run_team_tool, workspace_dir=workspace_dir),
-            func_name="run_team",
-        )
+        async def run_team_tool_fn(team_name: str, task: str) -> ToolChunk:
+            """触发一次团队编排：并行召集团队成员分析任务，lead 汇总成决策报告。
 
-    return toolkit
+            Args:
+                team_name: 团队名称（或 slug），须已存在于 teams/ 下
+                task: 分派给所有成员要分析/完成的任务
+            """
+            return await run_team_tool(team_name, task, workspace_dir=workspace_dir)
+
+        _add(run_team_tool_fn, name="run_team", allow=True)
+
+    return Toolkit(tools=tools, skills_or_loaders=skill_dirs)

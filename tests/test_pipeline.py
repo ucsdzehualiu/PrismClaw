@@ -22,9 +22,9 @@ except ModuleNotFoundError as e:
     missing = getattr(e, "name", "") or ""
     print("无法导入团队模块：%s（%s）" % (missing, e))
     if "agentscope" in missing:
-        print("→ 请用 launch.bat 里的 conda 环境跑测试，例如：")
-        print('   C:\\Users\\<你>\\.conda\\envs\\ai-course\\python.exe tests/test_pipeline.py')
-        print("   或先 `conda activate ai-course` 再 `python tests/test_pipeline.py`")
+        print("→ 请用 AgentScope 2.0 的 conda 环境跑测试（Python 3.11），例如：")
+        print('   C:\\Users\\<你>\\.conda\\envs\\prism2\\python.exe tests/test_pipeline.py')
+        print('   或先 `conda activate prism2` 再 `python tests/test_pipeline.py`')
     sys.exit(2)
     raise
 
@@ -45,19 +45,16 @@ class FakeReply:
 
 
 class FakeAgent:
-    """可 await 的假代理；记录它收到的输入，供断言上下文传递。"""
+    """可 reply 的假代理；记录它收到的输入，供断言上下文传递。"""
 
     def __init__(self, name, text):
         self.name = name
         self.text = text
         self.seen_inputs = []
 
-    async def __call__(self, msg):
+    async def reply(self, msg):
         self.seen_inputs.append(msg.get_text_content() if hasattr(msg, "get_text_content") else str(msg))
         return FakeReply(self.text)
-
-    def set_console_output_enabled(self, _b):
-        pass
 
 
 _ORIG = {}
@@ -350,10 +347,14 @@ async def test_toolkit_interactive():
     from tools import build_toolkit
 
     def names(tk):
-        fn = getattr(tk, "tools", None) or {}
-        if isinstance(fn, dict):
-            return set(fn.keys())
-        return {str(getattr(x, "name", x)) for x in (fn or [])}
+        # AgentScope 2.0：工具挂在 Toolkit.tool_groups[*].tools（list[ToolBase]）
+        out = set()
+        for g in getattr(tk, "tool_groups", []) or []:
+            for tool in getattr(g, "tools", []) or []:
+                nm = getattr(tool, "name", None)
+                if nm:
+                    out.add(nm)
+        return out
 
     main_tools = names(await build_toolkit("workspace", interactive=True))
     member_tools = names(await build_toolkit("workspace", interactive=False))

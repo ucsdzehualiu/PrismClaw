@@ -1,13 +1,17 @@
-"""PrismHarness 会话管理。
+"""PrismHarness 会话管理（AgentScope 2.0）。
 
 会话与全局会话管理器：
 - 每个 session 独立请求队列（asyncio.Queue）
-- pending_tool 队列（PrismHarnessGuard 确认）
+- HITL「停泊」队列（PrismHarnessGuard 已由 2.0 权限引擎取代）：
+  工具确认 / 结构化提问时，agent.reply_stream 会停泊（park），
+  session 记录停泊信息并等待用户决定，再用 UserConfirmResultEvent /
+  ExternalExecutionResultEvent 续跑同一轮对话。
 - 会话过期自动回收
 - 请求级打断（cancel）
 """
 
 import asyncio
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -21,43 +25,64 @@ class SessionStatus(str, Enum):
 
 
 class PendingStatus(str, Enum):
-    """待确认工具的状态。"""
+    """待确认/待回答状态。"""
 
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
 
 
-class PendingToolUse:
-    """一个待确认的工具调用。
+class PendingConfirm:
+    """一次被 agent 停泊（park）的待办：工具确认或结构化提问。
 
-    确认/拒绝只改 status，下一轮 PrismHarnessGuard._reasoning 轮询读取；
-    真正执行由 _acting 匹配到 APPROVED 后 pop 掉。这里不挂协程、不抛异常。
+    AgentScope 2.0 里 agent 遇到需要人工介入时不会挂起协程，而是 yield 一个
+    RequireUserConfirmEvent / RequireExternalExecutionEvent 后让 reply_stream 返回
+    （"停泊"）。这里记录停泊信息（reply_id + 待处理 tool_calls），
+    并提供一个 Event 供停泊的 streaming 协程 await；用户 /approve 等只改状态 + set 事件，
+    停泊协程醒来后用对应事件续跑——不轮询、不塞假 tool_result。
     """
 
-    def __init__(self, tool_use: dict):
-        self.tool_use = tool_use
+    def __init__(self, reply_id: str, tool_calls: list, kind: str = "confirm"):
+        self.reply_id = reply_id
+        self.tool_calls = list(tool_calls or [])   # list[ToolCallBlock]
+        self.kind = kind                            # "confirm" | "external"
         self.status = PendingStatus.PENDING
         self.created_at = time.time()
-        self.answer = None  # ask_user_question 的用户回答（dict）
+        self.answer: Any = None                     # external（ask_user_question）的回答
+        self._event = asyncio.Event()
 
     @property
     def name(self) -> str:
-        return self.tool_use.get("name", "unknown")
+        return self.tool_calls[0].name if self.tool_calls else "unknown"
 
     @property
     def input(self) -> Any:
-        return self.tool_use.get("input", {})
+        """解析首个 tool_call 的 input（2.0 里 input 是 JSON 字符串）。"""
+        if not self.tool_calls:
+            return {}
+        raw = getattr(self.tool_calls[0], "input", "")
+        if isinstance(raw, str):
+            try:
+                return json.loads(raw)
+            except Exception:
+                return {"raw": raw}
+        return raw or {}
 
     def is_expired(self, timeout: float) -> bool:
-        """等待超过 timeout 秒仍未确认 → 视为超时（仅在 PENDING 时判断）。"""
         return time.time() - self.created_at > timeout
 
     def resolve(self, approved: bool) -> None:
-        """设置状态以唤醒轮询（不 pop，pop 由 _acting 执行时完成）。"""
-        self.status = (
-            PendingStatus.APPROVED if approved else PendingStatus.REJECTED
-        )
+        self.status = PendingStatus.APPROVED if approved else PendingStatus.REJECTED
+        self._event.set()
+
+    def set_answer(self, answer: Any) -> None:
+        """外部工具（结构化提问）的回答：置 APPROVED 并唤醒。"""
+        self.answer = answer
+        self.status = PendingStatus.APPROVED
+        self._event.set()
+
+    async def wait(self) -> None:
+        await self._event.wait()
 
 
 @dataclass
@@ -67,6 +92,7 @@ class AgentRequest:
     session_id: str = ""
     content: Any = None
     canceled: bool = False
+    team_run: Any = None  # (/team 名称, 任务) —— 魔术命令解析后挂到这里
     _cancel_q: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
@@ -87,7 +113,7 @@ class AgentRequest:
 
 
 class Session:
-    """单个会话，管理请求队列和 pending 工具。"""
+    """单个会话，管理请求队列与 HITL 停泊。"""
 
     def __init__(self, session_id: str, expires: float = 1800):
         self.session_id = session_id
@@ -98,76 +124,67 @@ class Session:
         self.expires = expires
         self.status = SessionStatus.ACTIVE
         self.pending_req: Dict[str, AgentRequest] = {}
-        self.pending_tool_calls: List[PendingToolUse] = []
+        self.pending_confirms: List[PendingConfirm] = []
         self.auto_approve = False  # /approve_all 模式：跳过所有工具确认
-        # 当前活跃请求的 response_queue，供 middleware 推 confirm status 事件
         self.current_response_queue: Optional[asyncio.Queue] = None
 
-    async def add_pending_tool(self, pending: PendingToolUse):
-        async with self.lock:
-            self.pending_tool_calls.append(pending)
+    # ---- HITL 停泊 ----
 
-    async def get_pending_tool(self) -> Optional[PendingToolUse]:
+    async def add_pending(self, pending: PendingConfirm) -> PendingConfirm:
         async with self.lock:
-            return self.pending_tool_calls[0] if self.pending_tool_calls else None
+            self.pending_confirms.append(pending)
+            return pending
 
-    async def pop_pending_tool(self) -> Optional[PendingToolUse]:
+    async def get_pending(self) -> Optional[PendingConfirm]:
         async with self.lock:
-            return self.pending_tool_calls.pop(0) if self.pending_tool_calls else None
+            return self.pending_confirms[0] if self.pending_confirms else None
 
-    async def approve_head_pending(self) -> bool:
-        """把队首 pending 置为 APPROVED（供 /approve）。不 pop，等 _acting 执行时再 pop。"""
+    async def pop_pending(self) -> Optional[PendingConfirm]:
         async with self.lock:
-            if not self.pending_tool_calls:
+            return self.pending_confirms.pop(0) if self.pending_confirms else None
+
+    async def resolve_head(self, approved: bool) -> bool:
+        """唤醒队首停泊：只改状态并 set 事件，停泊协程随后自行 pop 并续跑。"""
+        async with self.lock:
+            if not self.pending_confirms:
                 return False
-            self.pending_tool_calls[0].resolve(True)
+            self.pending_confirms[0].resolve(approved)
             return True
 
-    async def reject_head_pending(self) -> bool:
-        """把队首 pending 置为 REJECTED（供 /reject）。不 pop，等 _reasoning 处理。"""
+    async def answer_head(self, answer: Any) -> bool:
+        """给队首的结构化提问写入回答并唤醒。"""
         async with self.lock:
-            if not self.pending_tool_calls:
+            if not self.pending_confirms:
                 return False
-            self.pending_tool_calls[0].resolve(False)
-            return True
-
-    async def answer_pending(self, answer) -> bool:
-        """给队首的 ask_user_question pending 写入用户回答并置为 APPROVED。"""
-        async with self.lock:
-            if not self.pending_tool_calls:
-                return False
-            p = self.pending_tool_calls[0]
-            if p.name != "ask_user_question":
-                return False
-            p.answer = answer
-            p.resolve(True)
+            self.pending_confirms[0].set_answer(answer)
             return True
 
     async def approve_all_pending(self) -> int:
-        """把所有待确认工具全部置为 APPROVED（供 /approve_all）。
-
-        只放行队首会让并行/批量工具产生的多个 pending 逐个继续弹确认卡，
-        表现为"approve_all 后还一直问我要不要执行"。这里一次性全放行。
-        返回被置为 APPROVED 的个数。
-        """
+        """把当前全部停泊一次性置为 APPROVED（供 /approve_all）。"""
         async with self.lock:
             n = 0
-            for p in self.pending_tool_calls:
+            for p in self.pending_confirms:
                 p.resolve(True)
                 n += 1
             return n
 
-    async def resolve_pending(self, approved: bool) -> bool:
-        """resolve 队首 pending（供 /resolve HTTP 端点）。
+    # ---- 兼容旧接口名 ----
+    async def get_pending_tool(self):
+        return await self.get_pending()
 
-        与 /approve /reject 魔术命令保持一致：只改 status、不 pop，
-        pop 由 PrismHarnessGuard._acting 真正执行时完成。返回是否有 pending。
-        """
-        async with self.lock:
-            if not self.pending_tool_calls:
-                return False
-            self.pending_tool_calls[0].resolve(approved)
-            return True
+    async def approve_head_pending(self) -> bool:
+        return await self.resolve_head(True)
+
+    async def reject_head_pending(self) -> bool:
+        return await self.resolve_head(False)
+
+    async def resolve_pending(self, approved: bool) -> bool:
+        return await self.resolve_head(approved)
+
+    async def answer_pending(self, answer: Any) -> bool:
+        return await self.answer_head(answer)
+
+    # ---- 会话生命周期 ----
 
     async def activate(self):
         async with self.lock:
@@ -208,19 +225,16 @@ class Session:
                 await req.cancel()
 
     async def release(self):
-        """释放所有资源。"""
         async with self.lock:
-            # 取消所有 pending 请求
             for req in self.pending_req.values():
                 try:
                     await req.cancel()
                 except Exception:
                     pass
             self.pending_req.clear()
-            self.pending_tool_calls.clear()
+            self.pending_confirms.clear()
 
     async def shutdown(self):
-        """标记 INACTIVE 并唤醒等待中的 agent_runner，使其退出循环。"""
         async with self.cond:
             self.status = SessionStatus.INACTIVE
             self.cond.notify_all()
@@ -242,7 +256,6 @@ class SessionManager:
     ) -> Optional[Session]:
         async with self.manager_lock:
             existing = self.sessions.get(session_id)
-            # 会话已过期 → 清理旧会话，重建新会话
             if existing and existing.status == SessionStatus.INACTIVE and create:
                 await existing.release()
                 del self.sessions[session_id]

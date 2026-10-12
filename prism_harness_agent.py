@@ -1,84 +1,103 @@
-"""PrismHarness 核心。
+"""PrismHarness 核心（AgentScope 2.0）。
 
-基于 AgentScope ReActAgent + PrismHarnessGuard Mixin，注入：
-- 推理提示 Hook (ReasoningHint) — 每次推理前注入规则提醒
-- 上下文可视化 Hook — 每轮生成 ContextSnapshot
-- 会话活跃保持 Hook — 防止超时
+AgentScope 2.0 把 ReActAgent + Memory + Formatter 合并成一个 `Agent`，
+对话状态挂在 `agent.state`（AgentState），模型输出是事件流（reply_stream）。
+本模块：
+
+- 用官方 `Agent` + 中间件（on_system_prompt 动态注入 persona/技能）。
+- HITL 走框架自带权限引擎：受保护工具在注册时打 ASK 权限，agent yield
+  RequireUserConfirmEvent 后**停泊并结束本轮**（与 1.0 的交互一致：确认卡片
+  结束本轮，用户 /approve 再用 UserConfirmResultEvent 驱动下一轮续跑）。
+- 结构化提问（ask_user_question）走 RequireExternalExecutionEvent /
+  ExternalExecutionResultEvent。
+- 把 2.0 事件流映射成前端既有的 SSE 信封（status/contents/...），前端无需大改。
 """
 
 import asyncio
-import inspect
 import json
 import os
-import sys
 import time
 import traceback
 from datetime import datetime
 
-from agentscope.agent import ReActAgent
-from agentscope.formatter import OpenAIChatFormatter
-from agentscope.memory import InMemoryMemory
-from agentscope.message import Msg
-from agentscope.pipeline import stream_printing_messages
+from agentscope.agent import Agent, ReActConfig, ContextConfig, InjectionConfig
+from agentscope.message import (
+    Msg,
+    UserMsg,
+    TextBlock,
+    ToolResultBlock,
+)
+from agentscope.middleware import MiddlewareBase
+from agentscope.event import (
+    RequireUserConfirmEvent,
+    RequireExternalExecutionEvent,
+    UserConfirmResultEvent,
+    ExternalExecutionResultEvent,
+    ConfirmResult,
+    ReplyStartEvent,
+    ReplyEndEvent,
+    ThinkingBlockDeltaEvent,
+    TextBlockDeltaEvent,
+    TextBlockEndEvent,
+    ToolCallStartEvent,
+    ToolCallDeltaEvent,
+    ToolCallEndEvent,
+    ToolResultStartEvent,
+    ToolResultTextDeltaEvent,
+    ToolResultEndEvent,
+)
 
-from prism_harness_guard import PrismHarnessGuardMixin
-from session import Session, SessionManager, AgentRequest, SessionStatus
+from session import Session, SessionManager, AgentRequest, SessionStatus, PendingConfirm
 from tools import (
     build_toolkit,
     format_system_prompt,
-    REASONING_HINT_TEMPLATE,
 )
-from model_config import build_model, build_token_counter, load_config
+from model_config import build_model, load_config
 from context_viz import ContextViz, TokenStats
-from conf import FLAGS, console
-
-# ── 请求级探针：在真正发 HTTP 前拦截 OpenAI client 的 create()，
-#    拿到 100% 真实的请求 payload（model/temperature/thinking/stream/tools…），
-#    这些是 ModelContextProbe 那层（只拿到上层传的 prompt/kwargs）永远碰不到的。
-_REQUEST_SINK = {"emit": None}
+from conf import FLAGS, console, GUARD_TIMEOUT
 
 
-def _msg_text(m) -> str:
-    """把 OpenAI 格式消息的 content（str 或 block 列表）压成可检索文本。"""
-    c = m.get("content") if isinstance(m, dict) else None
-    if isinstance(c, str):
-        return c
-    if isinstance(c, list):
-        parts = []
-        for b in c:
-            if isinstance(b, dict):
-                t = b.get("type", "")
-                if t == "text":
-                    parts.append(str(b.get("text", "")))
-                elif t == "tool_use":
-                    parts.append(str(b.get("name", "")))
-                else:
-                    parts.append(str(b.get("text", b.get("content", ""))))
-            else:
-                parts.append(str(b))
-        return "\n".join(parts)
-    return str(c) if c is not None else ""
+# =====================================================================
+# 请求级探针：拦截 OpenAI client 的 create()，拿到 100% 真实的请求 payload
+# =====================================================================
+
+def _block_text(block) -> str:
+    if block is None:
+        return ""
+    if isinstance(block, str):
+        return block
+    if isinstance(block, dict):
+        t = block.get("type", "")
+        if t == "text":
+            return str(block.get("text", ""))
+        if t == "thinking":
+            return str(block.get("thinking", ""))
+        return str(block.get("text", ""))
+    t = getattr(block, "type", "")
+    if t == "text":
+        return str(getattr(block, "text", ""))
+    if t == "thinking":
+        return str(getattr(block, "thinking", ""))
+    return str(getattr(block, "text", ""))
 
 
-def _is_internal_hint_msg(m) -> bool:
-    """注册在 memory 里的"内部信息，非用户输入"提示（role=user）属于实现噪声，
-    必须从展示给用户的上下文里剔除——否则面板会凭空多出一个 user 消息，
-    且这块噪声也会被原样发给模型、浪费 token。注意 content 可能是 block 列表，
-    不能用 isinstance(str) 判断，必须展开 block 文本再匹配。"""
-    return (
-        isinstance(m, dict)
-        and m.get("role") == "user"
-        and "内部信息，非用户输入" in _msg_text(m)
-    )
+def _msg_text(msg) -> str:
+    content = getattr(msg, "content", None)
+    if content is None and isinstance(msg, dict):
+        content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(_block_text(b) for b in content)
+    return str(content) if content is not None else ""
+
+
+def _is_internal_hint_msg(msg) -> bool:
+    role = getattr(msg, "role", None) or (msg.get("role") if isinstance(msg, dict) else None)
+    return role == "user" and "内部信息，非用户输入" in _msg_text(msg)
 
 
 def _extract_payload(kwargs: dict) -> dict:
-    """从最终请求 payload 抽取模型真实收到的全部内容，逐字保留、不丢任何东西。
-
-    - messages: 真正发给模型的 messages（含 system 提示，未经截断）——这就是"模型看见的上下文"主体
-    - tools:    真正发给模型的工具 schema（完整）
-    - params:   采样/元数据参数（model/temperature/thinking/stream…），probe 层永远碰不到
-    """
     eb = kwargs.get("extra_body") or {}
     ct = eb.get("chat_template_kwargs") or {}
     return {
@@ -86,35 +105,20 @@ def _extract_payload(kwargs: dict) -> dict:
             "model": kwargs.get("model"),
             "temperature": kwargs.get("temperature"),
             "top_p": kwargs.get("top_p"),
-            "max_tokens": kwargs.get("max_tokens"),
+            "max_tokens": kwargs.get("max_tokens") or kwargs.get("max_completion_tokens"),
             "stream": kwargs.get("stream"),
             "reasoning_effort": kwargs.get("reasoning_effort"),
-            # dsv4 thinking 开关（vLLM 走 chat_template_kwargs.enable_thinking）
             "thinking": ct.get("enable_thinking"),
             "tool_choice": kwargs.get("tool_choice"),
-            "response_format": "set" if kwargs.get("response_format") else None,
         },
-        # 完整 messages 原样透传（前端负责渲染），不计数不摘要
-        # 仅剔除 register_reasoning_hint 注入的"内部信息"提示（role=user 的实现噪声），
-        # 其余 100% 保留——包括 system/assistant/tool。content 可能是 block 列表，
-        # 因此用 _is_internal_hint_msg 展开 block 文本再判定。
-        "messages": [
-            m for m in (kwargs.get("messages") or [])
-            if not _is_internal_hint_msg(m)
-        ],
+        "messages": kwargs.get("messages") or [],
         "tools": kwargs.get("tools") or [],
-        # 完整顶层字段名清单——直接证明这是 100% 真实 payload
         "raw_keys": sorted(kwargs.keys()),
     }
 
 
 def _wrap_openai_client(model, sink: dict):
-    """包一层 model.client.chat.completions 的 create/stream/parse，
-    在真正把请求发出去之前把最终 kwargs 交给 sink.emit。
-    这样能拿到 100% 真实的请求 payload（model/temperature/thinking/stream/tools…），
-    这些是 ModelContextProbe 那层（只拿到上层传的 prompt/kwargs）永远碰不到的。"""
-    import asyncio
-
+    """包一层 model.client.chat.completions 的 create/stream，拦截真实请求 payload。"""
     client = getattr(model, "client", None)
     if client is None:
         return
@@ -124,7 +128,6 @@ def _wrap_openai_client(model, sink: dict):
         return
     orig_create = completions.create
     orig_stream = getattr(completions, "stream", None)
-    orig_parse = getattr(completions, "parse", None)
 
     async def _capture(kwargs):
         emit = sink.get("emit_request_payload")
@@ -147,304 +150,50 @@ def _wrap_openai_client(model, sink: dict):
     if orig_stream is not None:
         def patched_stream(**kwargs):
             try:
-                loop = asyncio.get_event_loop()
-                loop.create_task(_capture(kwargs))
+                asyncio.get_event_loop().create_task(_capture(kwargs))
             except Exception:
                 pass
             return orig_stream(**kwargs)
 
         completions.stream = patched_stream
 
-    if orig_parse is not None:
-        async def patched_parse(**kwargs):
-            await _capture(kwargs)
-            return await orig_parse(**kwargs)
 
-        completions.parse = patched_parse
+# =====================================================================
+# 中间件：动态 system prompt
+# =====================================================================
 
+class PersonaPromptMiddleware(MiddlewareBase):
+    """每次取 system prompt 时从磁盘重建 persona（IDENTITY/AGENTS/SOUL/USER），
+    改文件后下一轮立即生效。"""
 
-# ---- Mixin 组装：PrismHarnessAgent = PrismHarnessGuard + ReActAgent ----
+    def __init__(self, workspace_dir: str):
+        self.workspace_dir = workspace_dir
 
-class PrismHarnessAgent(PrismHarnessGuardMixin, ReActAgent):
-    """PrismHarness = ReActAgent + HITL 工具确认。"""
-    pass
-
-
-def _prompt_content_to_text(content) -> str:
-    """把 OpenAI 格式消息的 content（str 或 list[block]）转成可读文本原样呈现。"""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts = []
-        for b in content:
-            if isinstance(b, dict):
-                t = b.get("type", "")
-                if t == "text":
-                    parts.append(str(b.get("text", "")))
-                elif t == "tool_use":
-                    name = b.get("name", "")
-                    inp = _prompt_content_to_text(b.get("input", b.get("raw_input", "")))
-                    parts.append(f"[工具调用] {name} 参数: {inp}")
-                elif t == "tool_result":
-                    parts.append(f"[工具结果]\n{_prompt_content_to_text(b.get('output', b.get('content', '')))}")
-                else:
-                    parts.append(str(b))
-            else:
-                parts.append(str(b))
-        return "\n\n".join(p for p in parts if p)
-    if content is None:
-        return ""
-    return str(content)
-
-
-def _prompt_to_readable(prompt) -> list:
-    """把将要发给 LLM 的 prompt（list[dict]，OpenAI 格式）整理成可展示结构。
-
-    不做任何过滤/改写，只把 content 块与 tool_calls 转成可读文本——上下文是怎么样就怎么样。
-    同时把结构化的 tool_calls（name + arguments）原样带出，前端据此渲染成"工具调用参数"卡片，
-    而不是只扁平成一行文本糊在 <pre> 里。
-    """
-    if not isinstance(prompt, list):
-        return []
-    out = []
-    for m in prompt:
-        if not isinstance(m, dict):
-            continue
-        role = m.get("role", "unknown")
-        text = _prompt_content_to_text(m.get("content"))
-        # OpenAI 函数调用：assistant 消息 content=null，工具调用放在 tool_calls 字段
-        tcs = m.get("tool_calls")
-        structured_tcs = None
-        if tcs:
-            structured_tcs = []
-            parts = []
-            for tc in tcs:
-                fn = tc.get("function", {})
-                name = fn.get("name", "")
-                args = fn.get("arguments", "")
-                structured_tcs.append({"function": {"name": name, "arguments": args}})
-                parts.append(f"[工具调用] {name} 参数: {args}")
-            join = "\n\n".join(parts)
-            text = f"{text}\n\n{join}" if text else join
-        out.append({"role": role, "content": text, "tool_calls": structured_tcs})
-    return out
-
-
-def _safe_get(obj, name, default=None):
-    """AgentScope 的 ChatResponse 等对象对未知属性走 dict 式 __getattr__，
-    会抛 KeyError 而非 AttributeError；这里统一吞掉所有异常，
-    避免单个未知字段拖垮整条模型回复的提取。"""
-    try:
-        return getattr(obj, name, default)
-    except Exception:
-        return default
-
-
-def _agentscope_msg_to_readable(msg) -> dict:
-    """把模型回复（AgentScope ChatResponse / Msg / dict）转成前端可直接渲染的结构。
-
-    与 OpenAIChatFormatter 产出的 OpenAI 格式对齐：role / content(str) / tool_calls[...]，
-    这样 _renderApiMsg 能原样画出来，无需为回复另写一套渲染。
-
-    关键点：模型回复是 ChatResponse，它没有 role 字段（role 恒为 assistant），
-    且其 __getattr__ 对未知属性会抛 KeyError——绝不能用 getattr(msg, "role", ...) 去读。
-    content 是 block 列表（TextBlock / ToolUseBlock / ThinkingBlock），tool_calls
-    可能内嵌在 ToolUseBlock 里，也可能在顶层 tool_calls 字段。"""
-    if isinstance(msg, dict):
-        role = msg.get("role", "assistant")
-        content = msg.get("content")
-        top_tcs = msg.get("tool_calls")
-    else:
-        # ChatResponse：无 role 字段，恒为 assistant；content/tool_calls 用 _safe_get 安全读取
-        role = "assistant"
-        content = _safe_get(msg, "content")
-        top_tcs = _safe_get(msg, "tool_calls")
-
-    text_parts = []
-    tool_calls = []
-
-    def _append_text(t):
-        if t:
-            text_parts.append(str(t))
-
-    def _append_tool(name, args):
-        if not isinstance(args, str):
-            args = json.dumps(args, ensure_ascii=False)
-        tool_calls.append({"function": {"name": name, "arguments": args}})
-
-    def _handle_block(b):
-        if isinstance(b, str):
-            _append_text(b)
-            return
-        if isinstance(b, dict):
-            t = b.get("type")
-            if t == "text":
-                _append_text(b.get("text", ""))
-            elif t == "tool_use":
-                fn = b.get("function", {}) or {}
-                name = fn.get("name") or b.get("name", "")
-                _append_tool(name, b.get("arguments") if b.get("arguments") is not None else b.get("input"))
-            return
-        # AgentScope block 对象（TextBlock / ToolUseBlock）
-        bt = _safe_get(b, "type")
-        if bt == "text":
-            _append_text(_safe_get(b, "text", ""))
-        elif bt == "tool_use":
-            name = _safe_get(b, "name", "")
-            inp = _safe_get(b, "input", None)
-            if inp is None:
-                inp = _safe_get(b, "arguments", None)
-            _append_tool(name, inp)
-
-    if isinstance(content, str):
-        _append_text(content)
-    elif isinstance(content, list):
-        for b in content:
-            _handle_block(b)
-
-    # 兜底：部分 AgentScope 版本把 tool_calls 放在顶层
-    if isinstance(top_tcs, list):
-        for tc in top_tcs:
-            fn = tc.get("function", {}) if isinstance(tc, dict) else _safe_get(tc, "function", {})
-            name = fn.get("name", "") if isinstance(fn, dict) else _safe_get(fn, "name", "")
-            args = fn.get("arguments", "") if isinstance(fn, dict) else _safe_get(fn, "arguments", "")
-            if not isinstance(args, str):
-                args = json.dumps(args, ensure_ascii=False)
-            tool_calls.append({"function": {"name": name, "arguments": args}})
-
-    return {
-        "role": role,
-        "content": "\n".join(p for p in text_parts if p),
-        "tool_calls": tool_calls,
-    }
-
-
-class ModelContextProbe:
-    """包一层 model：每次真正调 LLM 前，把将要发送的上下文（原样）交给 sink 展示。
-
-    - __call__(prompt, **kwargs)：先把 prompt 交给 sink（前端展示 + viz 记录），再透传给真实模型。
-    - 其余属性（stream 等）透传到内层 model，不影响 AgentScope 原有行为。
-    """
-
-    def __init__(self, model, ctx_sink: dict):
-        object.__setattr__(self, "_probe_model", model)
-        object.__setattr__(self, "_probe_sink", ctx_sink)
-
-    def __getattr__(self, name):
-        return getattr(object.__getattribute__(self, "_probe_model"), name)
-
-    def __setattr__(self, name, value):
-        # stream 等属性写到内层 model，让 AgentScope 的开关逻辑照常生效
-        setattr(object.__getattribute__(self, "_probe_model"), name, value)
-
-    async def __call__(self, prompt, **kwargs):
-        sink = object.__getattribute__(self, "_probe_sink")
-        emit_ctx = sink.get("emit")
-        if emit_ctx is not None:
-            try:
-                # 把 **kwargs（含 tools / tool_choice）一并交给展示层（context_view 轮次元数据）。
-                await emit_ctx(prompt, kwargs)
-            except Exception:
-                pass  # 展示失败不能影响主流程
-        result = await object.__getattribute__(self, "_probe_model")(prompt, **kwargs)
-        # 流式（本项目 build_model(stream=True)）：result 是 async generator，逐块 yield 模型输出；
-        # 非流式：result 是完整 Msg。必须原样把 result 返回给上层（上层要迭代/await 它），
-        # 不能 await 它去"拿回复"——await 一个 async generator 只会拿到生成器本身，拿不到文本。
-        # 所以这里用"分流"：一边把每块 yield 给上层（保证流式/推理正常），一边在流结束后
-        # 把最终 ChatResponse 作为"模型回复"emit 出去。
-        if hasattr(result, "__aiter__"):
-            async def teed():
-                last_response = None
-                async for chunk in result:
-                    last_response = chunk
-                    yield chunk
-                # 流结束：把最终聚合出的 ChatResponse 作为"模型回复"emit，
-                # 让右侧上下文面板能原样展示模型这一步到底回了什么。
-                emit_reply = sink.get("emit_model_reply")
-                if emit_reply is not None and last_response is not None:
-                    try:
-                        await emit_reply({
-                            "step": sink.get("step"),
-                            "reply": _agentscope_msg_to_readable(last_response),
-                        })
-                    except Exception:
-                        pass
-            return teed()
-        # 非流式：完整 Msg，直接转换并 emit 回复
-        emit_reply = sink.get("emit_model_reply")
-        if emit_reply is not None:
-            try:
-                await emit_reply({
-                    "step": sink.get("step"),
-                    "reply": _agentscope_msg_to_readable(result),
-                })
-            except Exception:
-                pass
-        return result
-
-
-# ---- Agent 生命周期 ----
-
-async def register_reasoning_hint(agent: ReActAgent):
-    """注册推理前提示 Hook。"""
-    async def add_hint(agent: ReActAgent, kwargs):
-        now = datetime.now()
-        weekday_map = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
-        weekday = weekday_map[now.weekday()]
-        current_time = now.strftime(f"%Y年%m月%d日 {weekday} %H:%M:%S")
-        hint = REASONING_HINT_TEMPLATE.format(current_time=current_time)
-        await agent.memory.add(
-            Msg(name="inner_hint", content=hint, role="user"),
-            marks=["MY_REASONING_HINT"],
-        )
-
-    async def remove_hint(agent: ReActAgent, kwargs, output=None):
-        await agent.memory.delete_by_mark("MY_REASONING_HINT")
-
-    agent.register_instance_hook("pre_reasoning", "add_hint", add_hint)
-    agent.register_instance_hook("post_reasoning", "remove_hint", remove_hint)
-
-
-async def register_keepalive(agent: ReActAgent, sess: Session):
-    """注册会话活跃保持 Hook。"""
-    async def activate(agent: ReActAgent, kwargs, output=None):
-        await sess.activate()
-    for hook in ["pre_reasoning", "pre_acting", "post_acting", "post_reasoning"]:
-        agent.register_instance_hook(hook, "keepalive", activate)
-
-
-async def register_thinking_cleanup(agent: ReActAgent):
-    """每轮推理前清掉 ThinkingBlock，防 formatter warning + 省 token。"""
-    async def strip_thinking(agent: ReActAgent, kwargs):
+    async def on_system_prompt(self, agent: Agent, current_prompt: str) -> str:
         try:
-            gm = agent.memory.get_memory()
-            if inspect.iscoroutine(gm):
-                gm = await gm
-            for m in (gm or []):
-                content = getattr(m, "content", None)
-                if isinstance(content, list):
-                    # 过滤 thinking 块（dict 形式或 ThinkingBlock 对象）
-                    new_content = [c for c in content if (
-                        getattr(c, "type", "") if hasattr(c, "type")
-                        else c.get("type", "") if isinstance(c, dict)
-                        else ""
-                    ) != "thinking"]
-                    if len(new_content) != len(content):
-                        m.content = new_content
+            fresh = format_system_prompt([], self.workspace_dir)
         except Exception:
-            pass
+            return current_prompt
+        # 保留 2.0 可能已附加的 skills 尾部
+        extra = ""
+        for kw in ("<agent-skills", "# Skills", "Skills 使用指南"):
+            idx = current_prompt.find(kw) if current_prompt else -1
+            if idx != -1:
+                extra = "\n\n" + current_prompt[idx:]
+                break
+        return fresh + extra
 
-    agent.register_instance_hook("pre_reasoning", "strip_thinking", strip_thinking)
 
-
-# ---- 魔术命令处理 ----
+# =====================================================================
+# 魔术命令：只解析，不改 pending（续跑由 agent_runner 用事件驱动）
+# =====================================================================
 
 async def handle_magic_command(request: AgentRequest, sess: Session):
-    """处理 /approve /reject /approve_all 等魔术命令。
+    """解析 /approve /reject /approve_all /answer /team。
 
-    返回 (已处理, 确认文案)：
-    - 已处理=True 表示这是魔术命令，调用方据此决定是否重新驱动 agent；
-    - 确认文案用于「无 pending」时的即时回执（不调 LLM）。
+    返回 (已处理, 立即回执文案)。对 approve/reject/approve_all/answer，
+    只把意图记到 request.magic_cmd，真正的续跑由 agent_runner 构造
+    UserConfirmResultEvent / ExternalExecutionResultEvent 驱动下一轮。
     """
     text = ""
     if isinstance(request.content, list):
@@ -460,27 +209,13 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
         return False, ""
 
     cmd = text[1:]
-    if cmd == "approve":
-        if await sess.approve_head_pending():
-            return True, ""
-        return True, "当前没有等待确认的工具调用。"
-    elif cmd == "reject":
-        if await sess.reject_head_pending():
-            return True, ""
-        return True, "当前没有等待确认的工具调用。"
-    elif cmd == "approve_all":
-        sess.auto_approve = True
-        # 一次性放行队列里所有 pending（并行/批量工具会产生多个 pending，
-        # 之前只 APPROVED 队首，导致后面仍逐个弹确认卡、用户被迫反复批准）。
-        n = await sess.approve_all_pending()
-        if n:
-            return True, ""
-        return True, "已开启自动放行模式（后续高风险工具将直接执行）。"
-    elif cmd == "approve_all off":
+    if cmd in ("approve", "reject", "approve_all"):
+        request.magic_cmd = (cmd, None)
+        return True, ""
+    if cmd == "approve_all off":
         sess.auto_approve = False
         return True, "已关闭自动放行模式。"
-    elif cmd.startswith("answer"):
-        # /answer <json> —— 用户回答了结构化提问（ask_user_question）
+    if cmd.startswith("answer"):
         raw = cmd[len("answer"):].strip()
         answer = None
         if raw:
@@ -488,722 +223,570 @@ async def handle_magic_command(request: AgentRequest, sess: Session):
                 answer = json.loads(raw)
             except Exception:
                 answer = {"free_text": raw}
-        if answer is not None and await sess.answer_pending(answer):
-            return True, ""
-        return True, "当前没有等待回答的问题。"
-    elif cmd.startswith("team"):
-        # /team <名称> <任务> —— 触发一次团队编排（并行多成员 + lead 汇总）。
-        # 把解析结果挂到 request 上，agent_runner 检测到后走专门的团队流式路径。
+        request.magic_cmd = ("answer", answer)
+        return True, ""
+    if cmd.startswith("team"):
         rest = cmd[len("team"):].strip()
         if not rest:
             return True, "用法：/team <团队名称> <任务>。团队在设置页「团队」里创建。"
-        # 团队名到任务：取第一个空格；若无空格视为团队名，任务留空。
         parts = rest.split(" ", 1)
         team_name = parts[0].strip()
         task = parts[1].strip() if len(parts) > 1 else ""
         try:
             import team as team_mod
-            from conf import FLAGS
             if not FLAGS.get("enable_team", True):
                 return True, "团队编排功能已关闭（可在「功能开关」中开启）。"
             spec = team_mod.load_team(team_name, "workspace")
             if not spec:
-                names = "、".join(t["name"] for t in team_mod.list_teams("workspace")[:20])
-                return True, (
-                    f"找不到团队「{team_name}」。\n"
-                    f"可用团队：{names or '（暂无）'}\n"
-                    "可点输入框上方「🎭 团队」按钮一键运行，或在设置页「团队」里新建。"
-                )
+                return True, f"找不到团队「{team_name}」。可点输入框上方「🎭 团队」按钮运行。"
         except Exception as e:
             return True, f"读取团队失败：{e}"
-        request.team_run = (team_name, task)  # 交给 agent_runner 真正执行
+        request.team_run = (team_name, task)
         return True, ""
-    return False, ""  # 不认识的 / 命令，交给 agent 处理
+    return False, ""
 
 
-# ---- Agent Runner（每会话一个后台任务） ----
+async def _build_resume_inputs(sess: Session, request: AgentRequest):
+    """根据魔术命令 + 会话停泊，构造续跑 reply_stream 的输入事件。
+
+    返回 None 表示没有可续跑的停泊（调用方只回执）。
+    """
+    cmd = getattr(request, "magic_cmd", None)
+    if cmd is None:
+        return None
+    kind, answer = cmd
+    pc = await sess.get_pending()
+    if pc is None:
+        return None
+
+    # 结构化提问：只有 /answer 能续跑
+    if pc.kind == "external":
+        if kind != "answer":
+            return None
+        await sess.pop_pending()
+        ans = answer if answer is not None else {"answers": []}
+        res = ToolResultBlock(
+            type="tool_result",
+            id=getattr(pc.tool_calls[0], "id", ""),
+            name=getattr(pc.tool_calls[0], "name", "ask_user_question"),
+            output=json.dumps({"answers": ans}, ensure_ascii=False),
+        )
+        return ExternalExecutionResultEvent(reply_id=pc.reply_id, execution_results=[res])
+
+    # 工具确认：approve / reject / approve_all
+    if kind == "answer":
+        return None
+    await sess.pop_pending()
+    approved = kind != "reject"
+    if kind == "approve_all":
+        sess.auto_approve = True
+    return UserConfirmResultEvent(
+        reply_id=pc.reply_id,
+        confirm_results=[
+            ConfirmResult(
+                confirmed=approved,
+                tool_call=tc,
+                rules=(tc.suggested_rules or None) if approved else None,
+            )
+            for tc in pc.tool_calls
+        ],
+    )
+
+
+# =====================================================================
+# Agent Runner
+# =====================================================================
 
 async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
-    """每个 session 的后台 Agent 循环。"""
     ctx_cfg = cfg.get("context", {})
-    token_budget = ctx_cfg.get("token_budget", 32000)
+    token_budget = ctx_cfg.get("token_budget", 420000)
     max_iters = cfg.get("agent", {}).get("max_iters", 50)
     log_dir = cfg.get("logging", {}).get("dir", "session_logs")
 
     viz = ContextViz(log_dir, sess.session_id)
     console("[session-start]", sess.session_id)
 
-    # 整个会话复用同一个 Agent（保留 memory，实现多轮上下文真实累积）
     toolkit = await build_toolkit(workspace_dir)
     system_prompt = format_system_prompt([], workspace_dir)
     model = build_model(cfg, stream=True)
-    token_counter = build_token_counter(cfg)
-    compression_config = None
-    # 记忆压缩关闭（enable=False）：agentscope 的 _compress_memory_if_needed 在
-    # 遍历 memory 时若遇到缺少 "type" 键的 content block 会直接 KeyError 崩溃，
-    # 导致该会话的 agent 轮次中断、后续请求卡死（本地 vLLM 200k 上下文 + 较高
-    # token_budget，压缩阈值远超模型上限，本身基本不会触发，关闭零损失却消除崩溃源）。
-    if ctx_cfg.get("compress_threshold"):
-        compression_config = ReActAgent.CompressionConfig(
-            enable=False,
-            agent_token_counter=token_counter,
-            trigger_threshold=int(
-                token_budget * float(ctx_cfg.get("compress_threshold", 0.8)),
-            ),
-            keep_recent=int(ctx_cfg.get("keep_recent_messages", 6)),
-        )
-    # 包一层 model：每次真正调 API 前，把将要发送的上下文（原样）推向前端透明展示。
-    # ctx_sink 是会话级可变对象，每轮请求把 emit 指到当轮 SSE 流（见下方 streaming）。
+
     ctx_sink: dict = {}
-    probe = ModelContextProbe(model, ctx_sink)
-    _wrap_openai_client(model, ctx_sink)  # 拦截真正发出的请求 payload（含 step/params/messages/tools）
-    agent = PrismHarnessAgent(
-        name="PrismHarness",
-        sys_prompt=system_prompt,
-        model=probe,
-        formatter=OpenAIChatFormatter(),
-        toolkit=toolkit,
-        memory=InMemoryMemory(),
-        max_iters=max_iters,
-        parallel_tool_calls=cfg.get("agent", {}).get("parallel_tool_calls", True),
-        compression_config=compression_config,
-        _prism_harness_sess=sess,
-    )
-    # 控制台输出：默认关闭，避免终端刷屏；流式输出走 msg_queue，不受影响。
-    agent.set_console_output_enabled(
-        bool(cfg.get("agent", {}).get("console_output", False)),
+    _wrap_openai_client(model, ctx_sink)
+
+    context_config = ContextConfig(
+        trigger_ratio=float(ctx_cfg.get("compress_threshold", 0.8)),
+        reserve_ratio=float(ctx_cfg.get("reserve_ratio", 0.1)),
     )
 
-    # 记录当前 LLM 配置签名，用于每轮热重载判断是否需要重建 model。
+    agent = Agent(
+        name="PrismHarness",
+        system_prompt=system_prompt,
+        model=model,
+        toolkit=toolkit,
+        middlewares=[PersonaPromptMiddleware(workspace_dir)],
+        react_config=ReActConfig(max_iters=max_iters),
+        context_config=context_config,
+        injection_config=InjectionConfig(inject_runtime_state=True, timezone="Asia/Shanghai"),
+    )
+
     last_llm_sig = None
 
-    def apply_llm_config(new_cfg: dict):
-        """若 LLM 配置（provider/endpoint/model/api_key/thinking/temperature）变化，
-        则重建 model/token_counter 并热替换到 probe 与 agent 上，下一轮请求立即生效。"""
-        nonlocal model, token_counter, compression_config, last_llm_sig
-        sig = (
-            new_cfg.get("llm", {}).get("provider"),
-            new_cfg.get("providers", {}),
-        )
+    def apply_llm_config(new_cfg: dict) -> bool:
+        nonlocal model, last_llm_sig
+        sig = (new_cfg.get("llm", {}).get("provider"), new_cfg.get("providers", {}))
         if sig == last_llm_sig:
             return False
         last_llm_sig = sig
         model = build_model(new_cfg, stream=True)
-        _wrap_openai_client(model, ctx_sink)  # 重建后重新包一层（ctx_sink 会话级，step 计数共享）
-        token_counter = build_token_counter(new_cfg)
-        probe._probe_model = model
-        # 防御性替换：这些属性若不存在则跳过，不阻塞主流程
-        for attr in ("token_counter", "compression_config", "max_iters"):
-            if hasattr(agent, attr):
-                try:
-                    setattr(agent, attr, getattr(agent, attr))
-                except Exception:
-                    pass
-        agent.token_counter = token_counter
-        compression_config = None
-        n_ctx = new_cfg.get("context", {})
-        if n_ctx.get("compress_threshold") and hasattr(agent, "compression_config"):
-            compression_config = ReActAgent.CompressionConfig(
-                enable=False,  # 见上：关闭以规避 agentscope 压缩遇畸形 block 的 KeyError 崩溃
-                agent_token_counter=token_counter,
-                trigger_threshold=int(
-                    new_cfg.get("context", {}).get("token_budget", 32000)
-                    * float(n_ctx.get("compress_threshold", 0.8)),
-                ),
-                keep_recent=int(n_ctx.get("keep_recent_messages", 6)),
-            )
-            try:
-                agent.compression_config = compression_config
-            except Exception:
-                pass
+        _wrap_openai_client(model, ctx_sink)
+        agent.model = model
         return True
 
-    apply_llm_config(cfg)  # 初始化签名
-    await register_reasoning_hint(agent)
-    await register_keepalive(agent, sess)
-    await register_thinking_cleanup(agent)
+    apply_llm_config(cfg)
+
+    # 终端控制台输出渲染器：**会话级持久**，跨轮/跨停泊复用。
+    # ConsoleRenderer 内部累积回复消息（_accumulate 显式处理"无 ReplyStartEvent 的
+    # HITL 续跑"），所以工具调用的状态必须跨 park/resume 保留——每轮 new 一个会丢掉
+    # 上一轮的工具调用块，续跑时工具结果无处可挂。它会在 ReplyStartEvent 时按新
+    # reply_id 自动重置 _msg，故会话级复用对新一轮也安全。
+    console_renderer = None
 
     while True:
         request, status = await sess.get_request()
         if status == SessionStatus.INACTIVE:
             console("[session-end]", sess.session_id)
-            viz.commit()  # 最后一次落盘（同步方法，返回 md 路径）
+            viz.commit()
             await sess.release()
             break
 
         await sess.activate()
 
-        # 热重载：每轮请求前重读 config.yaml，若模型/API Key 等 LLM 配置有变，
-        # 立即重建 model 并热替换——设置页改完下一轮消息马上生效，无需重启。
         try:
-            fresh_cfg = load_config()
-            apply_llm_config(fresh_cfg)
+            apply_llm_config(load_config())
         except Exception:
-            pass  # 读/建失败则沿用现有模型，不中断本轮回话
+            pass
 
-        # 每轮重建 toolkit，让 manage_skill 新建的技能无需重启即可出现在
-        # ReActAgent.sys_prompt 动态附加的官方 Skills 提示词中。
         agent.toolkit = await build_toolkit(workspace_dir)
 
-        # 魔术命令
-        is_magic, magic_ack = await handle_magic_command(request, sess)
-        pending_exists = bool(await sess.get_pending_tool()) if is_magic else False
-
-        # 团队编排（/team <名称> <任务>）：并行多成员 + lead 汇总，独立流式路径
-        if getattr(request, "team_run", None):
-            team_name, team_task = request.team_run
-            response_q = request.response_queue
+        # 终端控制台输出（可选）：AgentScope 2.0 的 Agent 默认不打印任何东西，
+        # 需要用官方 ConsoleRenderer 渲染事件流到终端。config.agent.console_output
+        # 为 true 时开启（等价 1.0 的 set_console_output_enabled(True)）。
+        # 渲染器会话级复用（见上），此处只负责按开关惰性创建/关闭。
+        want_console = bool(cfg.get("agent", {}).get("console_output", False))
+        if not want_console:
+            console_renderer = None
+        elif console_renderer is None:
             try:
-                import team as team_mod
-                team_spec = team_mod.load_team(team_name, workspace_dir)
-                if not team_spec:
+                from agentscope.console import ConsoleRenderer
+                console_renderer = ConsoleRenderer()
+            except Exception:
+                console_renderer = None
+
+        is_magic, magic_ack = await handle_magic_command(request, sess)
+
+        if getattr(request, "team_run", None):
+            await _run_team_path(request, sess, cfg, workspace_dir)
+            continue
+
+        try:
+            if is_magic:
+                resume = await _build_resume_inputs(sess, request)
+                if resume is None:
+                    response_q = request.response_queue
                     await response_q.put({
                         "type": "status", "phase": "thinking", "step": 0,
-                        "detail": f"找不到团队「{team_name}」。",
+                        "detail": magic_ack or "已执行",
                     })
                     await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
                     await response_q.put(None)
                     await sess.finish_request(request)
                     continue
-
-                log_dir = cfg.get("logging", {}).get("dir", "session_logs")
-                run_id = "run_" + time.strftime("%Y%m%d_%H%M%S")
-                run_dir = os.path.join(log_dir, sess.session_id, "teams", run_id)
-
-                async def emit_team(ev):
-                    if request.canceled:
-                        return
-                    await response_q.put({"type": "team", **ev})
-
-                # 圆桌（19 位多阶段）/ 多阶段管线 需要更长的整轮预算 + 受限并发，
-                # 避免成员超时中断；普通并行团队用较短预算即可。
-                is_multi_stage = team_spec.get("type") in ("roundtable", "pipeline")
-                team_timeout = float(cfg.get("agent", {}).get(
-                    "roundtable_timeout", 1800 if is_multi_stage else 600,
-                ))
-                member_timeout = 600.0 if is_multi_stage else 300.0
-                max_concurrent = int(cfg.get("agent", {}).get("team_max_concurrent", 4))
-
-                async def run_team_and_emit():
-                    await response_q.put({
-                        "type": "status", "phase": "thinking", "step": 0,
-                        "detail": f"🎭 启动团队「{team_name}」并行编排…",
-                    })
-                    report, _results = await team_mod.run_team_stream(
-                        team_spec, team_task, emit_team, cfg, workspace_dir,
-                        run_dir=run_dir,
-                        member_timeout=member_timeout,
-                        max_concurrent=max_concurrent,
-                    )
-                    # 兜底：Agentscope 的「被打断」预设文案绝不允许当交付物递出去。
-                    # 各条路径内部已各自降级，这里只防漏网。
-                    if team_mod.is_interrupted_output(report):
-                        report = ("⚠️ 本次编排被中断（模型端在工具执行中被 cancel），未能产出最终报告。\n"
-                                  "建议检查模型端点稳定性后重新运行；本次各成员的中间产出已落盘在 "
-                                  "session_logs 对应目录下。")
-                    # 把最终报告作为正常 assistant 文本并入主对话
-                    await response_q.put({
-                        "msg_id": "team-report",
-                        "last": True,
-                        "contents": [{"type": "text", "content": report}],
-                    })
-
-                # 注册到 request.stream_task，让「停止」按钮 / /stop 能真正取消整轮编排
-                # （否则只是把 canceled 置真、事件不再发出，后台仍在空跑烧 token）。
-                team_run_task = asyncio.create_task(run_team_and_emit())
-                request.stream_task = team_run_task
-                try:
-                    await asyncio.wait_for(team_run_task, timeout=team_timeout)
-                    if request.canceled:
-                        await response_q.put({"cancel": True, "last": True, "contents": []})
-                    else:
-                        await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
-                        await response_q.put(None)
-                except asyncio.TimeoutError:
-                    team_run_task.cancel()
-                    await response_q.put({
-                        "type": "status", "phase": "error",
-                        "detail": f"团队运行超时（>{team_timeout:.0f}s），已终止。",
-                    })
-                    await response_q.put({"error": "team timeout", "last": True, "contents": []})
-                except asyncio.CancelledError:
-                    # /stop 会先置 request.canceled 再 cancel 任务：这属于用户主动中断，
-                    # 正常收尾即可，绝不能向上抛——否则会把整个会话循环一起取消掉。
-                    if not request.canceled:
-                        raise
-                    await response_q.put({"cancel": True, "last": True, "contents": []})
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:
-                console("[team-error]", e)
-                traceback.print_exc()
-                await response_q.put({
-                    "type": "status", "phase": "error",
-                    "detail": f"团队编排出错：{e}",
-                })
-                await response_q.put({"error": str(e), "last": True, "contents": []})
-            finally:
-                try:
-                    await response_q.put(None)
-                except Exception:
-                    pass
-                await sess.finish_request(request)
-            continue
-
-        # 独立魔法命令（无 pending）：直接返回确认，不调 LLM
-        if is_magic and not pending_exists:
-            response_q = request.response_queue
-            await response_q.put({
-                "type": "status",
-                "phase": "thinking",
-                "step": 0,
-                "detail": magic_ack or "已执行",
-            })
-            await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
-            await response_q.put(None)
-            await sess.finish_request(request)
-            continue
-
-        try:
-            response_q = request.response_queue
-
-            # 开始新一轮上下文可视化
-            user_text = ""
-            if isinstance(request.content, list):
-                user_text = " ".join(
-                    b.get("text", "") for b in request.content if b.get("type") == "text"
-                )
-            elif isinstance(request.content, str):
-                user_text = request.content
-            viz.start_round(user_text)
-
-            # 热更新式：每轮与 LLM 交互前，从当前文件重建 system prompt（persona/技能/画像），
-            # 并热更新到 agent —— 改 USER.md/AGENTS.md/SOUL.md 后下一轮立即真实生效；
-            # 配合上下文探头，右侧光谱面板展示的也正是这份最新实际发送的 system prompt。
-            system_prompt = format_system_prompt([], workspace_dir)
-            agent._sys_prompt = system_prompt
-
-            # 估算 System Prompt tokens（CJK 友好：每字 ~1 token）
-            sys_chars = len(system_prompt)
-            sys_tokens_est = sys_chars  # CJK 简化估算
-
-            # 魔术命令（/approve /approve_all 等）：命令文本不要写进 memory。
-            # 用 None 重新驱动 agent（reply(None) 不会 add 任何消息），
-            # 让 guard._reasoning 读到已 APPROVED/REJECTED 的 pending 继续执行。
-            inputs = (
-                None
-                if is_magic
-                else Msg(name="user", content=request.content, role="user")
-            )
-
-            q = asyncio.Queue()
-
-            # 把"本轮真正发送给 LLM 的上下文"灌进右侧光谱面板。
-            # ModelContextProbe 每次调 API 前会回调 emit，构造 context_view 事件实时刷新面板，
-            # full_messages 用真实 prompt 全量（不截断），一轮内多次调 API 会更新同一个轮块。
-            async def emit_context(prompt, kwargs=None):
-                kwargs = kwargs or {}
-                readable = [
-                    m
-                    for m in _prompt_to_readable(prompt)
-                    if not _is_internal_hint_msg(m)
-                ]
-                # 模型本轮真实收到的工具定义（OpenAI tools 字段）：
-                # 来自 ReActAgent._reasoning 的 model(prompt, tools=toolkit.get_json_schemas(), ...)
-                tools = kwargs.get("tools")
-                tool_choice = kwargs.get("tool_choice")
-                await q.put({
-                    "type": "context_view",
-                    "data": {
-                        "round": viz.round_num,
-                        "timestamp": datetime.now().isoformat(),
-                        "user_input": user_text,
-                        "full_messages": [
-                            {"role": m["role"], "content": m["content"], "chars": len(m["content"])}
-                            for m in readable
-                        ],
-                        # 新增：把工具 schema 也带进上下文面板，补全"模型看到的全貌"
-                        "tools": tools if isinstance(tools, list) else None,
-                        "tool_choice": tool_choice,
-                    },
-                    "msg_id": "ctx",
-                })
-            ctx_sink["emit"] = emit_context
-
-            async def emit_request_payload(payload):
-                # 原始请求负载无损落盘（模型每一步实际收到的完整入参，含结构化 tool_calls / tool 结果）
-                viz.record_request_payload(payload)
-                await q.put({
-                    "type": "request_payload",
-                    "data": payload,
-                    "msg_id": "req",
-                })
-
-            async def emit_model_reply(payload):
-                await q.put({
-                    "type": "model_reply",
-                    "data": payload,
-                    "msg_id": "reply",
-                })
-
-            ctx_sink["emit_request_payload"] = emit_request_payload
-            ctx_sink["emit_model_reply"] = emit_model_reply
-
-            async def streaming():
-                step = 0
-                tool_id_to_step = {}  # tool_use_id → step number
-                viz_records = {}      # tool_use_id → ToolCallRecord (用于回填参数/结果)
-                seen_tool_ids = set()  # 已记录的 tool_use_id（去重：流式会重复发送同一块）
-
-                # ---- 心跳：绝不静默。每 7s 告诉前端"我还在"，并带当前阶段 ----
-                current_phase = {"text": "正在思考…"}
-                heartbeat_stop = asyncio.Event()
-                async def heartbeat():
-                    tick = 0
-                    while not heartbeat_stop.is_set():
-                        try:
-                            await asyncio.wait_for(heartbeat_stop.wait(), timeout=7)
-                        except asyncio.TimeoutError:
-                            pass
-                        if heartbeat_stop.is_set():
-                            break
-                        tick += 1
-                        await q.put({
-                            "type": "status",
-                            "phase": "heartbeat",
-                            "detail": f"⏳ 仍在工作（{tick}）— {current_phase['text']}",
-                        })
-                hb_task = asyncio.create_task(heartbeat())
-
-                terminal_phase = "done"      # 终态：done / max_iters / canceled / error / paused
-                try:
-                    if request.canceled:
-                        terminal_phase = "canceled"
-                        return
-                    # 实时状态：开始推理
-                    await q.put({"type": "status", "phase": "thinking", "step": 0,
-                                 "detail": "正在思考…"})
-                    async for msg, last in stream_printing_messages(
-                        agents=[agent], coroutine_task=agent(inputs)
-                    ):
-                        if request.canceled:
-                            await q.put({"cancel": True, "last": True, "contents": []})
-                            terminal_phase = "canceled"
-                            return
-                        msg_id = getattr(msg, "id", None)
-                        msg_ret = {
-                            "msg_id": msg_id,
-                            "last": last,
-                            "contents": [],
-                        }
-
-                        for content in msg.content:
-                            if isinstance(content, dict):
-                                ctype = content.get("type", "")
-                                # dsv4 thinking 推理过程 → 实时推给前端
-                                if ctype == "thinking":
-                                    reasoning = content.get("thinking", "")
-                                    if reasoning:
-                                        preview = reasoning[-120:].replace("\n", " ").strip()
-                                        current_phase["text"] = f"🧠 推理… {preview}"
-                                        await q.put({
-                                            "type": "status",
-                                            "phase": "reasoning",
-                                            "detail": reasoning,
-                                            "preview": preview,
-                                        })
-                                    continue
-                                if ctype == "text":
-                                    raw_text = content.get("text", "")
-                                    # 更新当前阶段：让心跳显示模型在说什么（截前80字）
-                                    if raw_text and isinstance(raw_text, str) and len(raw_text) > 2:
-                                        preview = raw_text[:80].replace("\n", " ").strip()
-                                        current_phase["text"] = f"推理中… {preview}"
-                                    # 结构化提问 → 推 question 事件（携带问题数据，前端渲染选择卡片）
-                                    if raw_text and "需要你的选择" in raw_text:
-                                        current_phase["text"] = "等待你回答"
-                                        pending = await sess.get_pending_tool()
-                                        questions = []
-                                        if pending and pending.name == "ask_user_question" and isinstance(pending.input, dict):
-                                            questions = pending.input.get("questions", [])
-                                        await q.put({
-                                            "type": "status",
-                                            "phase": "question",
-                                            "detail": raw_text,
-                                            "questions": questions,
-                                        })
-                                        continue
-                                    # HITL 等待确认 → 推专门的 confirm 事件，前端直接渲染卡片（不重复发文本）
-                                    if raw_text and "工具调用需要确认" in raw_text and "🔒" in raw_text:
-                                        current_phase["text"] = "等待你确认工具调用"
-                                        await q.put({
-                                            "type": "status",
-                                            "phase": "confirm",
-                                            "detail": raw_text,
-                                        })
-                                        continue  # 跳过文本块，前端已通过 status 事件渲染卡片
-                                    elif raw_text and "等待确认" in raw_text:
-                                        current_phase["text"] = "等待你确认工具调用"
-                                        await q.put({
-                                            "type": "status",
-                                            "phase": "pending",
-                                            "detail": "🔒 等待你确认工具调用（见下方「允许/拒绝」按钮）",
-                                        })
-                                        continue  # 跳过文本块
-                                    # AgentScope may return list/dict instead of str
-                                    if isinstance(raw_text, list):
-                                        raw_text = " ".join(
-                                            t.get("text", "") if isinstance(t, dict) else str(t)
-                                            for t in raw_text
-                                        )
-                                    elif not isinstance(raw_text, str):
-                                        raw_text = str(raw_text)
-                                    msg_ret["contents"].append({
-                                        "type": "text",
-                                        "content": raw_text,
-                                    })
-                                elif ctype == "tool_use":
-                                    tool_id = content.get("id", "")
-                                    # 优先 input，缺失时尝试 raw_input
-                                    tool_input = content.get("input") or {}
-                                    if not tool_input and content.get("raw_input"):
-                                        try:
-                                            tool_input = json.loads(content["raw_input"])
-                                        except Exception:
-                                            tool_input = {}
-                                    # 诊断日志：看 dsv4 流式 tool_use 块的 input/raw_input 到底是什么
-                                    if tool_id not in seen_tool_ids:
-                                        pass  # 去重由下方 seen_tool_ids.add 处理
-                                    if tool_id not in seen_tool_ids:
-                                        # 新工具调用（AgentScope 流式会重复发送同一 tool_use 块，需去重）
-                                        seen_tool_ids.add(tool_id)
-                                        step += 1
-                                        tool_id_to_step[tool_id] = step
-                                        current_phase["text"] = f"调用工具 {content.get('name', '')}（第 {step} 步）"
-                                        # 实时状态：正在调用工具（仅首次出现时发一次）
-                                        await q.put({
-                                            "type": "status",
-                                            "phase": "acting",
-                                            "step": step,
-                                            "detail": f"正在调用工具：{content.get('name', '')}（第 {step} 步）",
-                                            "tool_name": content.get("name", ""),
-                                        })
-                                        rec = viz.add_tool_call(
-                                            step,
-                                            content.get("name", ""),
-                                            tool_input,
-                                        )
-                                        viz_records[tool_id] = rec
-                                    else:
-                                        # 同一调用的后续流式块：用更完整的参数覆盖（流式后块 input 更全）
-                                        if tool_id in viz_records and tool_input:
-                                            viz.update_tool_input(tool_id_to_step[tool_id], tool_input)
-                                    msg_ret["contents"].append({
-                                        "type": "tool_use",
-                                        "tool_use_id": content.get("id", ""),
-                                        "name": content.get("name", ""),
-                                        "input": tool_input,
-                                    })
-                                elif ctype == "tool_result":
-                                    raw_output = content.get("output", "")
-                                    # Extract readable text from ToolResponse format
-                                    if isinstance(raw_output, list):
-                                        parts = []
-                                        for item in raw_output:
-                                            if isinstance(item, dict):
-                                                t = item.get("text", item.get("content", ""))
-                                                if isinstance(t, list):
-                                                    t = " ".join(
-                                                        x.get("text", str(x)) if isinstance(x, dict) else str(x)
-                                                        for x in t
-                                                    )
-                                                parts.append(str(t))
-                                            else:
-                                                parts.append(str(item))
-                                        raw_output = "\n".join(parts)
-                                    elif isinstance(raw_output, dict):
-                                        raw_output = raw_output.get("text", str(raw_output))
-                                    elif not isinstance(raw_output, str):
-                                        raw_output = str(raw_output)
-                                    msg_ret["contents"].append({
-                                        "type": "tool_result",
-                                        "tool_use_id": content.get("id", ""),
-                                        "name": content.get("name", ""),
-                                        "output": raw_output,
-                                    })
-                                    # 更新 viz 中的工具结果
-                                    tid = content.get("id", "")
-                                    if tid in tool_id_to_step:
-                                        viz.update_tool_result(tool_id_to_step[tid], raw_output)
-                                        # 若此前 input 为空，用 raw_input 回填
-                                        if tid in viz_records and not viz_records[tid].params and content.get("raw_input"):
-                                            try:
-                                                viz.update_tool_input(tool_id_to_step[tid], json.loads(content["raw_input"]))
-                                            except Exception:
-                                                pass
-
-                        await q.put(msg_ret)
-
-                    # 循环正常结束。判断是否因 max_iters 用尽而停（而非模型主动结束）。
-                    # ReActAgent 到上限时不抛异常，静默返回——这正是"卡住不动"的来源。
-                    # 用工具调用步数 vs max_iters 近似判断：若逼近上限，标记 max_iters。
-                    if step >= max_iters:
-                        terminal_phase = "max_iters"
-
-                    # 推送 Token 统计和上下文快照
-                    # InMemoryMemory.get_memory() 在 AgentScope 1.0.x 是协程，必须 await
-                    mem_msgs = []
-                    try:
-                        gm = agent.memory.get_memory()
-                        if inspect.iscoroutine(gm):
-                            gm = await gm
-                        mem_msgs = gm or []
-                    except Exception:
-                        for attr in ("_messages", "_memory", "messages", "content"):
-                            mem_val = getattr(agent.memory, attr, None)
-                            if mem_val and isinstance(mem_val, list):
-                                mem_msgs = mem_val
-                                break
-                    # 填充完整 System Prompt 与历史消息（供前端展示 LLM 实际所见）
-                    # ReActAgent.sys_prompt 会动态附加 toolkit 技能提示词，必须取属性，
-                    # 而不是只取 format_system_prompt() 的裸输出。
-                    actual_system = agent.sys_prompt
-
-                    # 优先使用官方 token counter 统计真实上下文。失败时保留旧字符估算，
-                    # 避免展示层因编码兼容问题阻断主流程。
-                    try:
-                        system_prompt_for_count = await agent.formatter.format(
-                            [
-                                Msg("system", actual_system, "system"),
-                            ],
-                        )
-                        sys_tokens_est = await token_counter.count(
-                            system_prompt_for_count,
-                        )
-                        prompt_for_count = await agent.formatter.format(
-                            [
-                                Msg("system", actual_system, "system"),
-                                *mem_msgs,
-                            ],
-                        )
-                        total_est = await token_counter.count(prompt_for_count)
-                    except Exception:
-                        hist_tokens_est = 0
-                        for m in mem_msgs:
-                            m_content = getattr(m, "content", "")
-                            if isinstance(m_content, list):
-                                for c in m_content:
-                                    if isinstance(c, dict):
-                                        hist_tokens_est += len(
-                                            str(c.get("text", c.get("output", ""))),
-                                        )
-                                    else:
-                                        hist_tokens_est += len(str(c))
-                            else:
-                                hist_tokens_est += len(str(m_content))
-                        total_est = sys_tokens_est + hist_tokens_est
-
-                    viz.set_tokens(TokenStats(
-                        system_tokens=sys_tokens_est,
-                        history_tokens=max(total_est - sys_tokens_est, 0),
-                        input_tokens=len(user_text),
-                        total_tokens=total_est,
-                        budget=token_budget,
-                        pct=round(total_est / token_budget * 100, 1) if token_budget else 0,
-                    ))
-                    viz.set_system_context(actual_system, mem_msgs)
-
-                    # 推送上下文快照事件
-                    await q.put({"type": "context_view", "data": viz.to_event(), "msg_id": "ctx"})
-
-                except asyncio.CancelledError:
-                    terminal_phase = "canceled"
-                    await q.put({"cancel": True, "last": True, "contents": []})
-                except Exception as e:
-                    console("[error]", e)
-                    traceback.print_exc()
-                    terminal_phase = "error"
-                    await q.put({
-                        "type": "status",
-                        "phase": "error",
-                        "detail": f"出错了：{e}",
-                    })
-                    await q.put({
-                        "error": str(e),
-                        "last": True,
-                        "contents": [],
-                    })
-                finally:
-                    # 停心跳
-                    heartbeat_stop.set()
-                    try:
-                        await asyncio.wait_for(hb_task, timeout=2)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        hb_task.cancel()
-                    # 推终态：绝不静默。让前端明确知道这一轮为什么结束。
-                    if terminal_phase == "paused":
-                        # 暂停不算结束，不推 done；心跳已停，等 /approve 后新一轮会重新起心跳
-                        pass
-                    elif terminal_phase == "max_iters":
-                        await q.put({
-                            "type": "status",
-                            "phase": "max_iters",
-                            "detail": f"已达工具调用上限（{max_iters} 步），本轮结束。如需继续请告诉我下一步。",
-                        })
-                    elif terminal_phase != "done" and terminal_phase != "canceled":
-                        # done / canceled 已在对应分支推过内容，这里只补一个收尾状态
-                        await q.put({
-                            "type": "status",
-                            "phase": terminal_phase,
-                            "detail": "本轮结束。",
-                        })
-                    if terminal_phase != "paused":
-                        await q.put({"type": "status", "phase": "done", "detail": "完成"})
-                    await q.put(None)
-
-            request.stream_task = asyncio.create_task(streaming())
-            request._cancel_q = q  # 取消时直接往这里灌 cancel 事件，不等 LLM 迭代
-
-            # 单轮整体超时兜底：streaming 内部若因上游异常（如 agentscope 对畸形
-            # block 崩溃、模型流挂起等）迟迟不 put(None)，这里必须强制终止本轮，
-            # 否则 agent_runner 会永久 await q.get() → 该会话此后所有请求都卡死
-            # （表现为"发消息没反应/卡住不动"）。
-            round_timeout = float(cfg.get("agent", {}).get("round_timeout", 600))
-            while True:
-                try:
-                    msg = await asyncio.wait_for(q.get(), timeout=round_timeout)
-                except asyncio.TimeoutError:
-                    request.stream_task.cancel()
-                    try:
-                        await asyncio.wait_for(request.stream_task, timeout=3)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        pass
-                    except Exception:
-                        pass
-                    await response_q.put({
-                        "type": "status",
-                        "phase": "error",
-                        "detail": f"本轮处理超时（>{round_timeout:.0f}s），已强制终止。请重试。",
-                    })
-                    await response_q.put({
-                        "type": "error",
-                        "last": True,
-                        "contents": [],
-                    })
-                    break
-                await response_q.put(msg)
-                if msg is None:
-                    break
-
-            # 本轮完成，落盘
-            viz.commit()
-
+            else:
+                resume = None
+            await _run_chat_path(request, sess, cfg, workspace_dir, agent, viz, ctx_sink,
+                                 token_budget, max_iters, resume, console_renderer)
         except Exception as e:
             console("[runner-error]", e)
             traceback.print_exc()
         finally:
-            await response_q.put(None)
+            try:
+                await request.response_queue.put(None)
+            except Exception:
+                pass
             await sess.finish_request(request)
+
+
+# ---------------------------------------------------------------------
+# 单轮 reply：映射事件到 SSE；遇停泊则发卡片并结束本轮
+# ---------------------------------------------------------------------
+
+async def _run_chat_path(request, sess, cfg, workspace_dir, agent, viz, ctx_sink,
+                         token_budget, max_iters, resume_inputs, console_renderer=None):
+    response_q = request.response_queue
+
+    user_text = ""
+    if isinstance(request.content, list):
+        user_text = " ".join(
+            b.get("text", "") for b in request.content
+            if isinstance(b, dict) and b.get("type") == "text"
+        )
+    elif isinstance(request.content, str):
+        user_text = request.content
+
+    if resume_inputs is None:
+        viz.start_round(user_text)
+
+    q = asyncio.Queue()
+
+    async def emit_request_payload(payload):
+        try:
+            viz.record_request_payload(payload)
+        except Exception:
+            pass
+        await q.put({"type": "request_payload", "data": payload, "msg_id": "req"})
+
+    ctx_sink["emit_request_payload"] = emit_request_payload
+
+    async def streaming():
+        current_phase = {"text": "正在思考…"}
+        heartbeat_stop = asyncio.Event()
+
+        async def heartbeat():
+            tick = 0
+            while not heartbeat_stop.is_set():
+                try:
+                    await asyncio.wait_for(heartbeat_stop.wait(), timeout=7)
+                except asyncio.TimeoutError:
+                    pass
+                if heartbeat_stop.is_set():
+                    break
+                tick += 1
+                await q.put({"type": "status", "phase": "heartbeat",
+                             "detail": f"⏳ 仍在工作（{tick}）— {current_phase['text']}"})
+
+        hb_task = asyncio.create_task(heartbeat())
+        terminal = "done"
+        try:
+            inputs = resume_inputs or UserMsg(name="user", content=user_text)
+            terminal = await _stream_one_reply(
+                agent, inputs, q, sess, request, max_iters, current_phase, viz, console_renderer
+            )
+        except asyncio.CancelledError:
+            terminal = "canceled"
+            await q.put({"cancel": True, "last": True, "contents": []})
+        except Exception as e:
+            console("[error]", e)
+            traceback.print_exc()
+            terminal = "error"
+            await q.put({"type": "status", "phase": "error", "detail": f"出错了：{e}"})
+            await q.put({"error": str(e), "last": True, "contents": []})
+        finally:
+            heartbeat_stop.set()
+            try:
+                await asyncio.wait_for(hb_task, timeout=2)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                hb_task.cancel()
+
+            if terminal == "max_iters":
+                await q.put({"type": "status", "phase": "max_iters",
+                             "detail": f"已达工具调用上限（{max_iters} 步），本轮结束。"})
+            elif terminal not in ("done", "canceled", "parked_confirm", "parked_external"):
+                await q.put({"type": "status", "phase": terminal, "detail": "本轮结束。"})
+
+            # 停泊（确认卡片 / 提问卡片）也照 1.0 收尾推 done：前端据此收起 spinner 并保留卡片，
+            # 之后的 /approve、/answer 会用新的一轮把续跑内容推出来。canceled 不推 done。
+            if terminal != "canceled":
+                await _emit_context_snapshot(q, agent, viz, user_text, token_budget)
+                await q.put({"type": "status", "phase": "done", "detail": "完成"})
+            await q.put(None)
+
+    request.stream_task = asyncio.create_task(streaming())
+    request._cancel_q = q
+
+    round_timeout = float(cfg.get("agent", {}).get("round_timeout", 3600))
+    while True:
+        try:
+            msg = await asyncio.wait_for(q.get(), timeout=round_timeout)
+        except asyncio.TimeoutError:
+            request.stream_task.cancel()
+            try:
+                await asyncio.wait_for(request.stream_task, timeout=3)
+            except (asyncio.CancelledError, asyncio.TimeoutError, Exception):
+                pass
+            await response_q.put({"type": "status", "phase": "error",
+                                  "detail": f"本轮处理超时（>{round_timeout:.0f}s），已强制终止。"})
+            await response_q.put({"error": "timeout", "last": True, "contents": []})
+            break
+        await response_q.put(msg)
+        if msg is None:
+            break
+
+    viz.commit()
+
+
+async def _stream_one_reply(agent, inputs, q, sess, request, max_iters, current_phase, viz=None, renderer=None):
+    """跑一次（或若干次自动续跑）reply_stream，把事件映射进 q。
+
+    Returns: "done" / "canceled" / "parked_confirm" / "parked_external" / "max_iters"
+    """
+    while True:
+        text_by_block: dict = {}
+        tc_name: dict = {}
+        tc_args: dict = {}
+        tr_name: dict = {}
+        tr_text: dict = {}
+        parked_confirm = None
+        parked_external = None
+        terminal = "done"
+        step = 0
+        seen_tool_ids = set()
+
+        async for event in agent.reply_stream(inputs):
+            if request.canceled:
+                await q.put({"cancel": True, "last": True, "contents": []})
+                return "canceled"
+
+            # 终端控制台输出（可选）：把事件交给官方 ConsoleRenderer 打印
+            if renderer is not None:
+                try:
+                    renderer.render(event)
+                except Exception:
+                    pass
+
+            if isinstance(event, ReplyStartEvent):
+                await q.put({"type": "status", "phase": "thinking", "step": 0, "detail": "正在思考…"})
+
+            elif isinstance(event, ThinkingBlockDeltaEvent):
+                delta = getattr(event, "delta", "") or ""
+                if delta:
+                    preview = delta[-120:].replace("\n", " ").strip()
+                    current_phase["text"] = f"🧠 推理… {preview}"
+                    await q.put({"type": "status", "phase": "reasoning",
+                                 "detail": delta, "preview": preview})
+
+            elif isinstance(event, TextBlockDeltaEvent):
+                text_by_block[event.block_id] = text_by_block.get(event.block_id, "") + (event.delta or "")
+
+            elif isinstance(event, TextBlockEndEvent):
+                text = getattr(event, "text", None) or text_by_block.get(event.block_id, "")
+                if text:
+                    current_phase["text"] = f"推理中… {text[:80].replace(chr(10),' ').strip()}"
+                    await q.put({"msg_id": event.reply_id, "last": False,
+                                 "contents": [{"type": "text", "content": text}]})
+
+            elif isinstance(event, ToolCallStartEvent):
+                tc_name[event.tool_call_id] = event.tool_call_name
+                tc_args.setdefault(event.tool_call_id, "")
+
+            elif isinstance(event, ToolCallDeltaEvent):
+                tc_args[event.tool_call_id] = tc_args.get(event.tool_call_id, "") + (event.delta or "")
+
+            elif isinstance(event, ToolCallEndEvent):
+                tid = event.tool_call_id
+                name = tc_name.get(tid, "")
+                raw = tc_args.get(tid, "")
+                try:
+                    args = json.loads(raw) if raw else {}
+                except Exception:
+                    args = {"raw": raw}
+                if tid not in seen_tool_ids:
+                    seen_tool_ids.add(tid)
+                    step += 1
+                    current_phase["text"] = f"调用工具 {name}（第 {step} 步）"
+                    await q.put({"type": "status", "phase": "acting", "step": step,
+                                 "detail": f"正在调用工具：{name}（第 {step} 步）", "tool_name": name})
+                await q.put({"msg_id": event.reply_id, "last": False, "contents": [
+                    {"type": "tool_use", "tool_use_id": tid, "name": name, "input": args}
+                ]})
+                if viz is not None:
+                    try:
+                        viz.add_tool_call(step, name, args)
+                    except Exception:
+                        pass
+
+            elif isinstance(event, ToolResultStartEvent):
+                tr_name[event.tool_call_id] = event.tool_call_name
+                tr_text.setdefault(event.tool_call_id, "")
+
+            elif isinstance(event, ToolResultTextDeltaEvent):
+                tr_text[event.tool_call_id] = tr_text.get(event.tool_call_id, "") + (event.delta or "")
+
+            elif isinstance(event, ToolResultEndEvent):
+                tid = event.tool_call_id
+                out = tr_text.get(tid, "")
+                await q.put({"msg_id": event.reply_id, "last": False, "contents": [
+                    {"type": "tool_result", "tool_use_id": tid,
+                     "name": tr_name.get(tid, ""), "output": out}
+                ]})
+                if viz is not None:
+                    try:
+                        viz.update_tool_result(step, out)
+                    except Exception:
+                        pass
+
+            elif isinstance(event, RequireUserConfirmEvent):
+                parked_confirm = event
+
+            elif isinstance(event, RequireExternalExecutionEvent):
+                parked_external = event
+
+            elif isinstance(event, ReplyEndEvent):
+                reason = getattr(event, "finished_reason", None)
+                if "EXCEED_MAX_ITERS" in str(getattr(reason, "value", reason)):
+                    terminal = "max_iters"
+
+        # 事件流结束
+        if parked_confirm is None and parked_external is None:
+            return terminal
+
+        # auto_approve：确认类直接全部放行，本轮内续跑
+        if parked_confirm is not None and sess.auto_approve:
+            inputs = UserConfirmResultEvent(
+                reply_id=parked_confirm.reply_id,
+                confirm_results=[
+                    ConfirmResult(confirmed=True, tool_call=tc, rules=tc.suggested_rules or None)
+                    for tc in parked_confirm.tool_calls
+                ],
+            )
+            continue
+
+        # 停泊：记录 pending，发卡片，结束本轮
+        if parked_confirm is not None:
+            await sess.add_pending(PendingConfirm(parked_confirm.reply_id, parked_confirm.tool_calls, "confirm"))
+            tc = parked_confirm.tool_calls[0]
+            name = getattr(tc, "name", "")
+            try:
+                args = json.loads(getattr(tc, "input", "{}") or "{}")
+            except Exception:
+                args = {"raw": getattr(tc, "input", "")}
+            current_phase["text"] = "等待你确认工具调用"
+            card = (f"🔒 **工具调用需要确认**\n\n**工具:** `{name}`\n**参数:** `{args}`\n\n"
+                    f"请输入:\n- `/approve` — 允许执行\n- `/reject` — 拒绝执行")
+            await q.put({"type": "status", "phase": "confirm", "detail": card})
+            return "parked_confirm"
+
+        # 外部工具（结构化提问）
+        tool_call = parked_external.tool_calls[0]
+        try:
+            args = json.loads(getattr(tool_call, "input", "{}") or "{}")
+        except Exception:
+            args = {}
+        await sess.add_pending(PendingConfirm(parked_external.reply_id, parked_external.tool_calls, "external"))
+        await q.put({"type": "status", "phase": "question",
+                     "detail": "❓ 需要你的选择", "questions": args.get("questions", [])})
+        return "parked_external"
+
+
+async def _emit_context_snapshot(q, agent, viz, user_text, token_budget):
+    mem_msgs = []
+    try:
+        mem_msgs = agent.state.context or []
+    except Exception:
+        pass
+    actual_system = ""
+    try:
+        actual_system = agent._system_prompt
+    except Exception:
+        pass
+
+    total_est = 0
+    try:
+        import inspect as _inspect
+        maybe = agent.model.count_tokens(messages=mem_msgs, tools=None)
+        total_est = await maybe if _inspect.isawaitable(maybe) else maybe
+    except Exception:
+        total_est = sum(len(str(getattr(m, "content", ""))) for m in mem_msgs)
+
+    sys_tokens_est = len(actual_system)
+    try:
+        viz.set_tokens(TokenStats(
+            system_tokens=sys_tokens_est,
+            history_tokens=max(total_est - sys_tokens_est, 0),
+            input_tokens=len(user_text),
+            total_tokens=total_est,
+            budget=token_budget,
+            pct=round(total_est / token_budget * 100, 1) if token_budget else 0,
+        ))
+        viz.set_system_context(actual_system, mem_msgs)
+        await q.put({"type": "context_view", "data": viz.to_event(), "msg_id": "ctx"})
+    except Exception as e:
+        console("[viz-error]", e)
+
+
+# ---------------------------------------------------------------------
+# 团队编排路径
+# ---------------------------------------------------------------------
+
+async def _run_team_path(request, sess, cfg, workspace_dir):
+    response_q = request.response_queue
+    team_name, team_task = request.team_run
+    try:
+        import team as team_mod
+        team_spec = team_mod.load_team(team_name, workspace_dir)
+        if not team_spec:
+            await response_q.put({"type": "status", "phase": "thinking", "step": 0,
+                                  "detail": f"找不到团队「{team_name}」。"})
+            await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
+            await response_q.put(None)
+            return
+
+        log_dir = cfg.get("logging", {}).get("dir", "session_logs")
+        run_id = "run_" + time.strftime("%Y%m%d_%H%M%S")
+        run_dir = os.path.join(log_dir, sess.session_id, "teams", run_id)
+
+        async def emit_team(ev):
+            if request.canceled:
+                return
+            await response_q.put({"type": "team", **ev})
+
+        is_multi_stage = team_spec.get("type") in ("roundtable", "pipeline")
+        team_timeout = float(cfg.get("agent", {}).get("roundtable_timeout", 1800 if is_multi_stage else 600))
+        member_timeout = 600.0 if is_multi_stage else 300.0
+        max_concurrent = int(cfg.get("agent", {}).get("team_max_concurrent", 4))
+
+        async def run_team_and_emit():
+            await response_q.put({"type": "status", "phase": "thinking", "step": 0,
+                                  "detail": f"🎭 启动团队「{team_name}」并行编排…"})
+            report, _results = await team_mod.run_team_stream(
+                team_spec, team_task, emit_team, cfg, workspace_dir,
+                run_dir=run_dir, member_timeout=member_timeout, max_concurrent=max_concurrent,
+            )
+            if team_mod.is_interrupted_output(report):
+                report = ("⚠️ 本次编排被中断，未能产出最终报告。建议检查模型端点稳定性后重跑；"
+                          "各成员中间产出已落盘在 session_logs 对应目录下。")
+            await response_q.put({"msg_id": "team-report", "last": True,
+                                  "contents": [{"type": "text", "content": report}]})
+
+        team_run_task = asyncio.create_task(run_team_and_emit())
+        request.stream_task = team_run_task
+        try:
+            await asyncio.wait_for(team_run_task, timeout=team_timeout)
+            if request.canceled:
+                await response_q.put({"cancel": True, "last": True, "contents": []})
+            else:
+                await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
+        except asyncio.TimeoutError:
+            team_run_task.cancel()
+            await response_q.put({"type": "status", "phase": "error",
+                                  "detail": f"团队运行超时（>{team_timeout:.0f}s），已终止。"})
+            await response_q.put({"error": "team timeout", "last": True, "contents": []})
+        except asyncio.CancelledError:
+            if not request.canceled:
+                raise
+            await response_q.put({"cancel": True, "last": True, "contents": []})
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        console("[team-error]", e)
+        traceback.print_exc()
+        await response_q.put({"type": "status", "phase": "error", "detail": f"团队编排出错：{e}"})
+        await response_q.put({"error": str(e), "last": True, "contents": []})
+    finally:
+        try:
+            await response_q.put(None)
+        except Exception:
+            pass
+        await sess.finish_request(request)
 
 
 # ---- 工厂函数 ----
@@ -1212,7 +795,6 @@ SESS_MGR = SessionManager(expires=300)
 
 
 async def get_or_create_agent(session_id: str, cfg: dict = None, workspace_dir: str = "workspace") -> Session:
-    """获取或创建会话（自动启动 agent_runner 后台任务）。"""
     if cfg is None:
         cfg = load_config()
     SESS_MGR.expires = float(cfg.get("session", {}).get("expires", 300))

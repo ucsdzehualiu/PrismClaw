@@ -10,9 +10,15 @@ echo.
 cd /d "%~dp0"
 
 REM ---- 激活 conda 环境（否则 python 可能被 WindowsApps 空壳劫持）----
-call C:\ProgramData\miniconda3\Scripts\activate.bat ai-course >nul 2>&1
+REM   AgentScope 2.0 需 Python >= 3.11，用 prism2 环境；
+REM   找不到时回落到旧的 ai-course 环境（仍跑 1.0，仅供参考）。
+call C:\ProgramData\miniconda3\Scripts\activate.bat prism2 >nul 2>&1
 if errorlevel 1 (
-    echo [!] conda not found, trying system python...
+    echo [!] conda env prism2 not found, trying ai-course...
+    call C:\ProgramData\miniconda3\Scripts\activate.bat ai-course >nul 2>&1
+    if errorlevel 1 (
+        echo [!] conda not found, trying system python...
+    )
 )
 set "PYTHON=python"
 

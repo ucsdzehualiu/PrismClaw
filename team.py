@@ -239,9 +239,7 @@ async def build_team_agent(member: dict, cfg: dict, workspace_dir: str):
     镜像 tools.run_subagent 的构造方式：build_model(stream=False) + build_toolkit
     + OpenAIChatFormatter + InMemoryMemory + 关闭控制台输出。
     """
-    from agentscope.agent import ReActAgent
-    from agentscope.formatter import OpenAIChatFormatter
-    from agentscope.memory import InMemoryMemory
+    from agentscope.agent import Agent, ReActConfig
 
     model_cfg = cfg
     # 可选成员级模型覆盖
@@ -266,39 +264,29 @@ async def build_team_agent(member: dict, cfg: dict, workspace_dir: str):
         + (f"你的角色：{role}。" if role else "")
     )
     sys_prompt = f"{header}\n\n{prompt}\n\n请独立完成分派给你的任务，用简洁分点的中文输出你的分析结论。不要反问、不要征询确认。"
-    member_agent = ReActAgent(
+    member_agent = Agent(
         name=_sanitize_filename(member.get("name", "member")),
-        sys_prompt=sys_prompt,
+        system_prompt=sys_prompt,
         model=model,
-        formatter=OpenAIChatFormatter(),
         toolkit=await build_toolkit(workspace_dir, interactive=False),
-        memory=InMemoryMemory(),
-        max_iters=int(cfg.get("agent", {}).get("max_iters", 30)),
-        parallel_tool_calls=bool(cfg.get("agent", {}).get("parallel_tool_calls", False)),
+        react_config=ReActConfig(max_iters=int(cfg.get("agent", {}).get("max_iters", 30))),
     )
-    member_agent.set_console_output_enabled(False)
     return member_agent
 
 
 async def build_lead_agent(team: dict, cfg: dict, workspace_dir: str):
-    """构造 lead 的「精简 ReActAgent」（无 HITL）。"""
-    from agentscope.agent import ReActAgent
-    from agentscope.formatter import OpenAIChatFormatter
-    from agentscope.memory import InMemoryMemory
+    """构造 lead 的「精简 Agent」（无 HITL）。"""
+    from agentscope.agent import Agent, ReActConfig
 
     lead_prompt = team.get("lead_prompt") or DEFAULT_LEAD_PROMPT
     model = build_model(cfg, stream=False)
-    lead_agent = ReActAgent(
+    lead_agent = Agent(
         name="team-lead",
-        sys_prompt=lead_prompt,
+        system_prompt=lead_prompt,
         model=model,
-        formatter=OpenAIChatFormatter(),
         toolkit=await build_toolkit(workspace_dir, interactive=False),
-        memory=InMemoryMemory(),
-        max_iters=int(cfg.get("agent", {}).get("max_iters", 30)),
-        parallel_tool_calls=bool(cfg.get("agent", {}).get("parallel_tool_calls", False)),
+        react_config=ReActConfig(max_iters=int(cfg.get("agent", {}).get("max_iters", 30))),
     )
-    lead_agent.set_console_output_enabled(False)
     return lead_agent
 
 
@@ -306,10 +294,10 @@ async def build_lead_agent(team: dict, cfg: dict, workspace_dir: str):
 
 async def _run_agent_once(agent, text: str, timeout: float = 300.0) -> str:
     """跑一次精简代理，返回文本输出。"""
-    from agentscope.message import Msg
+    from agentscope.message import UserMsg
 
     reply = await asyncio.wait_for(
-        agent(Msg("user", text, "user")),
+        agent.reply(UserMsg(name="user", content=text)),
         timeout=float(timeout),
     )
     txt = reply.get_text_content() if hasattr(reply, "get_text_content") else str(reply)
@@ -557,22 +545,16 @@ def _stage_prompt(task, results, header_md):
 
 async def _design_agent_for(prompt: str, name: str, cfg: dict, workspace_dir: str):
     """构造一个"角色专用"精简代理，prompt 即其角色+任务指令。"""
-    from agentscope.agent import ReActAgent
-    from agentscope.formatter import OpenAIChatFormatter
-    from agentscope.memory import InMemoryMemory
+    from agentscope.agent import Agent, ReActConfig
 
     model = build_model(cfg, stream=False)
-    a = ReActAgent(
+    a = Agent(
         name=name,
-        sys_prompt=(prompt or "").strip(),
+        system_prompt=(prompt or "").strip(),
         model=model,
-        formatter=OpenAIChatFormatter(),
         toolkit=await build_toolkit(workspace_dir, interactive=False),
-        memory=InMemoryMemory(),
-        max_iters=int(cfg.get("agent", {}).get("max_iters", 30)),
-        parallel_tool_calls=bool(cfg.get("agent", {}).get("parallel_tool_calls", False)),
+        react_config=ReActConfig(max_iters=int(cfg.get("agent", {}).get("max_iters", 30))),
     )
-    a.set_console_output_enabled(False)
     return a
 
 
@@ -593,11 +575,11 @@ async def _run_design_agent_checked(prompt, name, task, input_text, cfg, workspa
 
 async def _run_design_agent(prompt: str, name: str, task: str, input_text: str, cfg: dict, workspace_dir: str, timeout: float):
     """跑一个角色代理，输入是拼好的候选文本 + 原任务。"""
-    from agentscope.message import Msg
+    from agentscope.message import UserMsg
 
     agent = await _design_agent_for(prompt, name, cfg, workspace_dir)
     user_msg = f"任务：{task}\n\n{input_text}"
-    reply = await asyncio.wait_for(agent(Msg("user", user_msg, "user")), timeout=float(timeout))
+    reply = await asyncio.wait_for(agent.reply(UserMsg(name="user", content=user_msg)), timeout=float(timeout))
     return reply.get_text_content() if hasattr(reply, "get_text_content") else str(reply)
 
 

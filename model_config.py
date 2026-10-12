@@ -1,6 +1,7 @@
-"""PrismHarness LLM 模型配置。基于 AgentScope OpenAIChatModel，接入自部署 dsv4。"""
+"""PrismHarness LLM 模型配置。基于 AgentScope 2.0 OpenAIChatModel，接入自部署 dsv4。"""
 
 import os
+
 import yaml
 
 
@@ -37,42 +38,51 @@ def load_config(path: str = "config.yaml") -> dict:
 
 
 def build_model(cfg: dict, stream: bool = True):
-    """构建 AgentScope 兼容的 LLM 模型实例。"""
+    """构建 AgentScope 2.0 的 OpenAIChatModel 实例。
+
+    AgentScope 2.0 把模型参数拆成三块：
+    - credential：api_key / base_url（OpenAI 兼容端点）
+    - Parameters：temperature / max_tokens / parallel_tool_calls / thinking…
+    - extra_body：透传给 OpenAI 兼容后端的额外字段（vLLM 的 chat_template_kwargs）
+
+    1.0 的 `client_kwargs={"base_url": ...}` / `generate_kwargs={...}` 写法在 2.0
+    已不存在。token 计数也内置在 model.count_tokens，不再需要单独的 token counter。
+    """
     _ensure_ssl_env()
     provider_name = cfg["llm"]["provider"]
     provider_cfg = cfg["providers"][provider_name]
 
+    from agentscope.credential import OpenAICredential
     from agentscope.model import OpenAIChatModel
 
-    generate_kwargs = {"temperature": cfg["llm"].get("temperature", 0.0)}
+    llm_cfg = cfg.get("llm", {})
 
-    # dsv4 thinking 控制（vLLM 用 chat_template_kwargs，字段名是 reasoning）
+    # dsv4 thinking 控制（vLLM 用 chat_template_kwargs，字段名是 enable_thinking）。
     # 优先取 provider 自己的 enable_thinking（设置页可按 provider 单独配），
     # 未配置时回落到顶层 llm.enable_thinking。
     enable_thinking = provider_cfg.get(
         "enable_thinking",
-        cfg["llm"].get("enable_thinking", False),
+        llm_cfg.get("enable_thinking", False),
     )
-    generate_kwargs["extra_body"] = {
-        "chat_template_kwargs": {"enable_thinking": enable_thinking}
-    }
+
+    parameters = OpenAIChatModel.Parameters(
+        temperature=llm_cfg.get("temperature", 0.0),
+        parallel_tool_calls=llm_cfg.get(
+            "parallel_tool_calls",
+            cfg.get("agent", {}).get("parallel_tool_calls", True),
+        ),
+    )
 
     return OpenAIChatModel(
-        model_name=provider_cfg["model"],
-        api_key=provider_cfg["api_key"],
+        credential=OpenAICredential(
+            api_key=provider_cfg["api_key"],
+            base_url=provider_cfg.get("api_base"),
+        ),
+        model=provider_cfg["model"],
+        parameters=parameters,
         stream=stream,
-        client_kwargs={"base_url": provider_cfg["api_base"]},
-        generate_kwargs=generate_kwargs,
+        context_size=llm_cfg.get("context_size", 128000),
+        extra_body={
+            "chat_template_kwargs": {"enable_thinking": enable_thinking}
+        },
     )
-
-
-def build_token_counter(cfg: dict):
-    """构建官方 CompressionConfig 用的 token 计数器。
-
-    用 OpenAI 兼容的 tiktoken 计数，与主模型 model_name 对齐。
-    """
-    from agentscope.token import OpenAITokenCounter
-
-    provider_name = cfg["llm"]["provider"]
-    provider_cfg = cfg["providers"][provider_name]
-    return OpenAITokenCounter(model_name=provider_cfg["model"])
