@@ -2,16 +2,14 @@
 
 会话与全局会话管理器：
 - 每个 session 独立请求队列（asyncio.Queue）
-- HITL「停泊」队列（PrismHarnessGuard 已由 2.0 权限引擎取代）：
-  工具确认 / 结构化提问时，agent.reply_stream 会停泊（park），
-  session 记录停泊信息并等待用户决定，再用 UserConfirmResultEvent /
-  ExternalExecutionResultEvent 续跑同一轮对话。
+- HITL「停泊」队列：工具确认 / 结构化提问时 agent.reply_stream 会停泊（park），
+  session 记录停泊信息（reply_id + tool_calls）；用户 /approve 以新的一轮
+  /chat 进入，由 UserConfirmResultEvent / ExternalExecutionResultEvent 续跑。
 - 会话过期自动回收
 - 请求级打断（cancel）
 """
 
 import asyncio
-import json
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -24,65 +22,21 @@ class SessionStatus(str, Enum):
     INACTIVE = "INACTIVE"
 
 
-class PendingStatus(str, Enum):
-    """待确认/待回答状态。"""
-
-    PENDING = "pending"
-    APPROVED = "approved"
-    REJECTED = "rejected"
-
-
 class PendingConfirm:
     """一次被 agent 停泊（park）的待办：工具确认或结构化提问。
 
     AgentScope 2.0 里 agent 遇到需要人工介入时不会挂起协程，而是 yield 一个
     RequireUserConfirmEvent / RequireExternalExecutionEvent 后让 reply_stream 返回
-    （"停泊"）。这里记录停泊信息（reply_id + 待处理 tool_calls），
-    并提供一个 Event 供停泊的 streaming 协程 await；用户 /approve 等只改状态 + set 事件，
-    停泊协程醒来后用对应事件续跑——不轮询、不塞假 tool_result。
+    （"停泊"）。这里只记录停泊信息（reply_id + 待处理 tool_calls + 类型），
+    真正的续跑由下一轮 /chat 上的 `_build_resume_inputs` 构造对应事件驱动——
+    不轮询、不挂起协程、也不塞假 tool_result。
     """
 
     def __init__(self, reply_id: str, tool_calls: list, kind: str = "confirm"):
         self.reply_id = reply_id
         self.tool_calls = list(tool_calls or [])   # list[ToolCallBlock]
         self.kind = kind                            # "confirm" | "external"
-        self.status = PendingStatus.PENDING
         self.created_at = time.time()
-        self.answer: Any = None                     # external（ask_user_question）的回答
-        self._event = asyncio.Event()
-
-    @property
-    def name(self) -> str:
-        return self.tool_calls[0].name if self.tool_calls else "unknown"
-
-    @property
-    def input(self) -> Any:
-        """解析首个 tool_call 的 input（2.0 里 input 是 JSON 字符串）。"""
-        if not self.tool_calls:
-            return {}
-        raw = getattr(self.tool_calls[0], "input", "")
-        if isinstance(raw, str):
-            try:
-                return json.loads(raw)
-            except Exception:
-                return {"raw": raw}
-        return raw or {}
-
-    def is_expired(self, timeout: float) -> bool:
-        return time.time() - self.created_at > timeout
-
-    def resolve(self, approved: bool) -> None:
-        self.status = PendingStatus.APPROVED if approved else PendingStatus.REJECTED
-        self._event.set()
-
-    def set_answer(self, answer: Any) -> None:
-        """外部工具（结构化提问）的回答：置 APPROVED 并唤醒。"""
-        self.answer = answer
-        self.status = PendingStatus.APPROVED
-        self._event.set()
-
-    async def wait(self) -> None:
-        await self._event.wait()
 
 
 @dataclass
@@ -142,47 +96,6 @@ class Session:
     async def pop_pending(self) -> Optional[PendingConfirm]:
         async with self.lock:
             return self.pending_confirms.pop(0) if self.pending_confirms else None
-
-    async def resolve_head(self, approved: bool) -> bool:
-        """唤醒队首停泊：只改状态并 set 事件，停泊协程随后自行 pop 并续跑。"""
-        async with self.lock:
-            if not self.pending_confirms:
-                return False
-            self.pending_confirms[0].resolve(approved)
-            return True
-
-    async def answer_head(self, answer: Any) -> bool:
-        """给队首的结构化提问写入回答并唤醒。"""
-        async with self.lock:
-            if not self.pending_confirms:
-                return False
-            self.pending_confirms[0].set_answer(answer)
-            return True
-
-    async def approve_all_pending(self) -> int:
-        """把当前全部停泊一次性置为 APPROVED（供 /approve_all）。"""
-        async with self.lock:
-            n = 0
-            for p in self.pending_confirms:
-                p.resolve(True)
-                n += 1
-            return n
-
-    # ---- 兼容旧接口名 ----
-    async def get_pending_tool(self):
-        return await self.get_pending()
-
-    async def approve_head_pending(self) -> bool:
-        return await self.resolve_head(True)
-
-    async def reject_head_pending(self) -> bool:
-        return await self.resolve_head(False)
-
-    async def resolve_pending(self, approved: bool) -> bool:
-        return await self.resolve_head(approved)
-
-    async def answer_pending(self, answer: Any) -> bool:
-        return await self.answer_head(answer)
 
     # ---- 会话生命周期 ----
 

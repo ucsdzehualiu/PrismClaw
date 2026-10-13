@@ -1060,20 +1060,22 @@ async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = Tr
     只读工具标 `is_read_only=True`，引擎自动放行、不打扰用户。
     """
     # ── 技能目录：workspace/skills 优先，仓库根 skills 兜底（同名 workspace 覆盖）──
+    # 由 enable_skill_auto_discover 控制；关掉则不自动扫描（技能不会挂进 System Prompt）。
     skill_dirs: list[str] = []
-    seen: set[str] = set()
-    for base in (os.path.join(workspace_dir, "skills"), "skills"):
-        if not os.path.isdir(base):
-            continue
-        for skill_name in sorted(os.listdir(base)):
-            d = os.path.join(base, skill_name)
-            if (
-                os.path.isdir(d)
-                and os.path.isfile(os.path.join(d, "SKILL.md"))
-                and skill_name not in seen
-            ):
-                seen.add(skill_name)
-                skill_dirs.append(d)
+    if FLAGS.get("enable_skill_auto_discover", True):
+        seen: set[str] = set()
+        for base in (os.path.join(workspace_dir, "skills"), "skills"):
+            if not os.path.isdir(base):
+                continue
+            for skill_name in sorted(os.listdir(base)):
+                d = os.path.join(base, skill_name)
+                if (
+                    os.path.isdir(d)
+                    and os.path.isfile(os.path.join(d, "SKILL.md"))
+                    and skill_name not in seen
+                ):
+                    seen.add(skill_name)
+                    skill_dirs.append(d)
 
     tools: list[ToolBase] = []
 

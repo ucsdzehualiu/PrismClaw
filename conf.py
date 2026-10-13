@@ -21,15 +21,13 @@ FLAGS = {
     "enable_websearch": True,
     "enable_subagent": True,
     "enable_team": True,   # 团队编排（多智能体圆桌）
-    "enable_cron": True,
-    "enable_sandbox": False,
 
     # 技能系统
     "enable_skills": True,
-    "enable_skill_auto_discover": True,
+    "enable_skill_auto_discover": True,   # 自动扫描 skills/ 并挂进 System Prompt
 }
 
-# 需要人工确认的工具 (PrismHarnessGuard 会拦截这些)
+# 需要人工确认的工具（仅供设置页展示；实际权限在 tools.py 注册期声明）
 GUARD_TOOLS = [
     "write_text_file",
     "insert_text_file",

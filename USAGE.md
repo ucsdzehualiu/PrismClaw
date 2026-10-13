@@ -13,12 +13,12 @@
 **手动启动：**
 
 ```bash
-conda activate ai-course     # 或任意装了 requirements.txt 的 Python 环境
+conda activate prism2     # 或任意装了 requirements.txt 的 Python 环境
 python server.py
 # 浏览器打开 http://localhost:8765
 ```
 
-> ⚠️ 一定要用 `launch.bat` 里那个 conda 环境（本例是 `ai-course`）。
+> ⚠️ 一定要用 `launch.bat` 里那个 conda 环境（AgentScope 2.0 需 Python ≥ 3.11，本例是 `prism2`）。
 > 系统自带的 python 没装 `agentscope`，会直接报 `No module named 'agentscope'`。
 
 **配置模型**：打开页面 → 右上 ⚙️ 设置 → 填 `api_base` / `api_key` / `model` → 点「测试」确认连通 → 保存（下一轮对话立即生效，不用重启）。
@@ -134,7 +134,7 @@ session_logs/<会话ID>/teams/run_<时间戳>/
 **PowerShell（你的默认终端）：**
 
 ```powershell
-conda activate ai-course            # 关键：test_pipeline.py 需要 agentscope
+conda activate prism2            # 关键：test_pipeline.py 需要 agentscope
 
 python tests/test_pipeline.py       # ① 编排逻辑（不调模型）
 node   tests/test_console_widget.js # ② 团队面板渲染（不调模型、不用浏览器）
@@ -146,7 +146,7 @@ $env:PH_LIVE=1; node tests/test_console_browser.js   # ④ ③ + 真跑一次团
 **Git Bash / CMD：**
 
 ```bash
-conda activate ai-course
+conda activate prism2
 python tests/test_pipeline.py
 node   tests/test_console_widget.js
 node   tests/test_console_browser.js
@@ -155,7 +155,7 @@ PH_LIVE=1 node tests/test_console_browser.js
 
 | 测试 | 验什么 | 耗时 | 花钱 |
 |---|---|---|---|
-| `test_pipeline.py` | 27 项：三种团队类型的阶段编排、成员报错不中断、被打断后重建重试、上下文累积、落盘文件 | <1s | 否 |
+| `test_pipeline.py` | 44 项：三种团队类型的阶段编排、成员报错不中断、被打断后重建重试、上下文累积、落盘文件 | <1s | 否 |
 | `test_console_widget.js` | 16 项：面板 HTML（类型/阶段进度/耗时/收起展开/同名成员区分/引号转义） | <1s | 否 |
 | `test_console_browser.js` | 12 项：真 Chrome 加载页面、console 无报错、真 DOM 里面板渲染与交互 | ~15s | 否 |
 | `PH_LIVE=1` 上面那条 | +5 项：真的点 🎭 → 选团队（评审团）→ 运行，验证面板与报告真的出现 | ~1-2min | 是（3 次小调用） |
@@ -166,7 +166,7 @@ PH_LIVE=1 node tests/test_console_browser.js
 - 后两个测试用 Node，不需要装任何包（用 Node 内置 WebSocket 驱动 Chrome）。
 - `test_console_browser.js` 会**自动起 server**（8765 没在跑时）、跑完自动关掉；它启动 server 用的是 `python`，所以也要在那个 conda 环境里跑，或显式指定：
   ```powershell
-  $env:PH_PYTHON="C:\Users\<你>\.conda\envs\ai-course\python.exe"; node tests/test_console_browser.js
+  $env:PH_PYTHON="C:\Users\<你>\.conda\envs\prism2\python.exe"; node tests/test_console_browser.js
   ```
 - 换端口：`$env:PH_URL="http://127.0.0.1:9000"`。
 - 没装 Chrome/Edge 时，第 ③ 步会提示并跳过（不报错）。
@@ -177,7 +177,7 @@ PH_LIVE=1 node tests/test_console_browser.js
 
 | 现象 | 原因 / 怎么办 |
 |---|---|
-| `No module named 'agentscope'` | 没用对 Python 环境 → 双击 `launch.bat`，或 `conda activate ai-course` |
+| `No module named 'agentscope'` | 没用对 Python 环境 → 双击 `launch.bat`，或 `conda activate prism2` |
 | 端口 8765 被占用 | 双击 `launch.bat`（会自动清旧进程），或手动 `python cleanup.py` |
 | 团队跑很久没动静 | 正常，每个阶段/成员都要调一次模型。看面板的「阶段 x/y」和「已用时」 |
 | 某个成员显示 ❌ | 该成员超时或报错，其它成员与后续阶段仍会继续；报告里会标注 |

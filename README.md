@@ -1,6 +1,6 @@
 # PrismHarness
 
-> 一个基于 **AgentScope** 框架构建的透明 AI Agent。
+> 一个基于 **AgentScope 2.0** 框架构建的透明 AI Agent。
 > 核心能力：**每轮上下文可视化**（看清模型这一轮“看到了什么”）+ **HITL 工具确认**（写文件 / 跑命令前必须人工确认）+ **实时流式与可打断**（当前在想什么、调什么工具、随时中断）。
 
 ## 功能特性
@@ -34,10 +34,12 @@ cp config.example.yaml config.yaml
 
 ### 2. 启动
 
+> **环境要求**：AgentScope 2.0 需要 **Python ≥ 3.11**（Windows 上用 conda 环境 `prism2`；`launch.bat` 会自动激活，找不到时回落到旧的 `ai-course`）。
+
 ```bash
 # 方式一：双击启动（推荐，Windows）
 双击 launch.bat
-# 自动：清理旧进程 → 清 __pycache__ → 起服务 → 端口就绪后开浏览器
+# 自动：激活环境 → 清理旧进程 → 清 __pycache__ → 起服务 → 端口就绪后开浏览器
 
 # 方式二：手动
 pip install -r requirements.txt
@@ -57,11 +59,9 @@ python server.py
                                            ▼
                               agent_runner() 每会话一个后台循环
                               (prism_harness_agent.py)
-                                ├─ PrismHarnessAgent
-                                │   = PrismHarnessGuardMixin + ReActAgent (AgentScope)
-                                │     ├─ _reasoning (注入提示)
-                                │     └─ _acting  (HITL 拦截)
-                                │        (prism_harness_guard.py)
+                                ├─ AgentScope Agent（ReAct 循环 + 中间件）
+                                │   ├─ on_system_prompt 中间件（动态注入 persona/技能）
+                                │   └─ 权限引擎（受保护工具注册期打 ASK → 停泊 / 续跑）
                                 ├─ build_toolkit() 工具包 (tools.py)
                                 ├─ run_team_stream() 团队编排 (team.py)
                                 │   ├─ 并行团队：成员并行分析 → lead 汇总
@@ -77,8 +77,14 @@ python server.py
 1. 浏览器发 `POST /chat`，server 把请求塞进 `Session` 的请求队列。
 2. `agent_runner` 取出请求，交给 `PrismHarnessAgent` 跑 ReAct 循环。
 3. 每一步 AgentScope 产出的消息（文本 / 工具调用 / 工具结果）被 `streaming()` 捕获，转成 SSE 事件推回浏览器。
-4. 遇到高风险工具，`prism_harness_guard` 拦截、入队 pending、弹确认卡片；你 `/approve` 后下一轮才真正执行。
+4. 遇到高风险工具，2.0 权限引擎判 ASK → agent 停泊（本轮结束）、弹确认卡片；你 `/approve` 用**新的一轮**续跑，才真正执行。
 5. 每轮结束，`ContextViz` 生成上下文快照（JSON + Markdown）落盘到 `session_logs/`。
+
+### 三个设计要点
+
+- **语义交给模型，确定性交给代码。** 意图理解靠 System Prompt + 技能描述（`SKILL.md` 的 `description` 写成触发条件）让模型自路由；而权限、编排、打断这些「必须正确」的事一律用代码兜底，不过模型。所以没有独立的意图分类器——那会引入一个新的失败点。
+- **HITL 是声明式的，不是拦截式的。** 受保护工具在**注册期**打 `PermissionDecision(ASK)`，权限是数据；停泊/续跑用框架的一等公民事件协议（`RequireUserConfirmEvent` / `UserConfirmResultEvent`），不覆写私有方法、不伪造 tool_result。
+- **编排要确定性、要可测。** 12 套外部专家团是固定 SOP，所以自研 `team.py` 按 `stages` 确定性驱动，而不是用框架里「leader 临场决定派谁」的 `TeamPipeline`——代价是少了临场弹性，换来的是**能脱开 LLM 做 44 项回归测试**。
 
 ## 文件说明
 
@@ -87,16 +93,16 @@ python server.py
 - `cleanup.py` — 清理脚本，杀掉 8765 端口旧进程 + 删 `__pycache__`。
 - `config.example.yaml` — 配置文件模板，复制为 `config.yaml` 后填入你的 API Key。
 - `config.yaml` — 运行配置（**不提交到 Git**，含 API Key）。
-- `conf.py` — 功能开关，含 HITL 确认工具列表 `GUARD_TOOLS` 与超时 `GUARD_TIMEOUT`。
-- `model_config.py` — 基于 AgentScope `OpenAIChatModel` 构建模型实例。
+- `conf.py` — 功能开关；另含 `GUARD_TOOLS` / `GUARD_TIMEOUT`（现仅供设置页展示，实际权限在 `tools.py` **注册期**声明）。
+- `model_config.py` — 基于 AgentScope 2.0 `OpenAIChatModel` 构建模型实例（credential / parameters / extra_body 三段式，支持多 provider 切换）。
 - `requirements.txt` — Python 依赖。
 
 ### 核心模块
-- `prism_harness_agent.py` — Agent 定义（`PrismHarnessAgent`）+ 每会话后台运行循环 `agent_runner()`，负责流式 SSE 推送、心跳、工具调用去重、magic 命令（`/approve` `/reject`）。
-- `prism_harness_guard.py` — HITL 工具确认（`PrismHarnessGuardMixin`），重写 ReActAgent 的 `_reasoning` / `_acting`，靠 pending 状态轮询实现“确认后才执行”。
-- `tools.py` — 工具系统，基于 AgentScope `Toolkit` 注册全部内置工具（命令执行 / 网页抓取 / 联网搜索 / 技能管理 / 文件下载）并生成系统提示词。
+- `prism_harness_agent.py` — 2.0 `Agent` 的构造与每会话后台运行循环 `agent_runner()`：把 `reply_stream` 事件流映射回前端既有 SSE 信封，负责心跳、工具调用按 id 归并、magic 命令（`/approve` `/reject` `/team`）与 **HITL 停泊 / 续跑**（`_stream_one_reply` / `_build_resume_inputs`）。
+- `tools.py` — 工具系统：基于 AgentScope `Toolkit` 注册全部内置工具（命令执行 / 网页抓取 / 联网搜索 / 技能管理 / 文件下载），受保护工具在**注册期**打 `PermissionDecision(behavior=ASK)`（只读工具 `is_read_only=True` 由引擎自动放行）；并生成系统提示词。
 - `context_viz.py` — 上下文可视化引擎（`ContextViz`），每轮生成结构化上下文快照供前端透明化展示与落盘。
-- `session.py` — 会话管理（`Session` / `SessionManager`），请求队列、HITL 确认队列、超时回收。
+- `session.py` — 会话管理（`Session` / `SessionManager`），请求队列、HITL 停泊队列、超时回收。
+  > 1.0 的 `prism_harness_guard.py`（覆写 `_reasoning` / `_acting` + 假 tool_result）已随 2.0 迁移**删除**，HITL 改由框架权限引擎承担。
 - `server.py` — FastAPI 服务，提供 Web 界面与 SSE 流式对话接口。
 - `index.html` — Web 界面（三栏：对话 / 上下文光谱 / 工具时间线）。
 - `team.py` — 团队编排（`run_team_stream`）：并行 / 圆桌 / 多阶段 pipeline 三种类型，含打断重试、上下文累积与增量落盘。
@@ -110,6 +116,11 @@ python tests/test_pipeline.py                     # 编排逻辑（免费）
 node tests/test_console_widget.js                 # 面板渲染（免费）
 node tests/test_console_browser.js                # 真实浏览器（免费，需本机有 Chrome/Edge）
 PH_LIVE=1 node tests/test_console_browser.js      # 真实浏览器 + 真跑一次团队（调模型）
+
+python tests/smoke2.py                            # 导入 / 工具包 / Agent 构造 / 权限上下文（免费）
+python tests/smoke_live.py                        # 真实 LLM 单轮 HITL 确认→执行（需模型）
+python tests/smoke_team_live.py                   # 真实 LLM 团队端到端（需模型）
+python tests/smoke_server.py                      # FastAPI + SSE /approve 续跑（需 server 在跑）
 ```
 
 ### 工作区
@@ -119,22 +130,24 @@ PH_LIVE=1 node tests/test_console_browser.js      # 真实浏览器 + 真跑一�
 
 ## 核心机制
 
-### HITL 工具确认
-1. 模型要调高风险工具 → `_acting` 拦截、入队 pending、假装执行完、进入下一轮。
-2. 下一轮 `_reasoning` 发现 pending → 发确认卡片（🔒 + 参数 + `/approve`/`/reject`）。
-3. 你点允许（`/approve`）→ `pending.status = APPROVED`。
-4. 再下一轮 `_reasoning` 重放原 tool_use → `_acting` 匹配到 APPROVED → 真正执行。
-5. 超时未确认 → 自动拒绝，进程不挂起。
+### HITL 工具确认（AgentScope 2.0 权限引擎）
+1. 受保护工具在 `tools.py` 注册时打 `PermissionDecision(behavior=ASK)`；只读工具标 `is_read_only=True`，引擎自动放行、不打扰用户。
+2. 模型要调它 → 权限引擎判 ASK → agent yield `RequireUserConfirmEvent` 并**停泊（本轮结束）**，确认卡片（🔒 + 参数）推给前端。
+3. 你 `/approve` → 走**新的一轮** `/chat`，`_build_resume_inputs` 构造 `UserConfirmResultEvent` 续跑；批准则真正执行、拒绝则注入 DENIED 结果。
+4. `/approve_all` 置 `auto_approve`，本轮内自动放行；批准可带 `suggested_rules` 实现「以后都允许」。
+5. 停泊**不占协程**（不是挂起等待），所以不会死锁；`GUARD_TIMEOUT` 仅作兜底。
+
+> 结构化提问 `ask_user_question`（= 2.0 内置 `AskUser` 改名）走另一条通道：`RequireExternalExecutionEvent` → 前端弹选择题 → `/answer` 续跑。
 
 ### 防死循环（多重保险）
-- 普通工具在 `_acting` 中直接放行，结果正常回传，避免模型反复重试。
+- 只读工具标 `is_read_only=True`，由权限引擎直接放行、结果正常回传，避免反复打扰用户。
 - 同一 URL / query 的工具调用有次数上限，禁止重复。
-- 单轮 ReAct 迭代硬上限（`max_iters`，默认 6），到顶强制停。
+- 单轮 ReAct 迭代硬上限（`max_iters`，config.yaml 默认 30），到顶强制停。
 - 系统提示中明确“拿到结果就停、不重复调用”等铁规则。
 
-### 流式处理（dsv4 适配）
-- dsv4 流式 chunk 为累计全文，取最后一个即可。
-- `tool_use` 块流式重复发送，按 id 去重；后块参数更完整，覆盖前块。
+### 流式处理
+- 2.0 用类型化事件流（`ReplyStartEvent` / `TextBlockDeltaEvent` / `ToolCallEndEvent` / `ToolResultEndEvent`…），由 `prism_harness_agent.py` 映射回前端既有 SSE 信封。
+- 工具调用按 `tool_call_id` 归并：增量 delta 累积，到 `ToolCallEndEvent` 才 emit 一次。
 - 每 7 秒推一条心跳，绝不静默。
 
 ## HTTP API
@@ -146,7 +159,13 @@ PH_LIVE=1 node tests/test_console_browser.js      # 真实浏览器 + 真跑一�
 | GET | `/stop?session_id=&request_id=` | 打断当前生成 |
 | GET | `/get_personas` | 读 AGENTS / SOUL / USER |
 | POST | `/update_persona` | `{"target":"soul","content":"..."}` 改人格文件 |
-| GET | `/api/teams` | 列出所有已保存团队（slug / name / 成员数）
+| GET · POST | `/api/config` | 读 / 写可编辑配置子集（白名单字段），写后热重载 |
+| GET | `/api/status` | 配置概览 + 环境 / 依赖检测 |
+| GET · POST | `/api/flags` | 读 / 写功能开关 |
+| POST | `/api/test_model` | 发一个最小请求，验证 api_base / key / model 连通 |
+| GET | `/api/logs` · `/api/log?session=&file=` | 列 / 读会话日志 |
+| GET | `/api/session/transcript?session=` | 从快照重建对话记录 |
+| GET | `/api/teams` | 列出所有已保存团队（slug / name / 成员数） |
 | GET | `/api/teams/{slug}` | 读取指定团队 JSON 配置
 | POST | `/api/teams/{slug}` | 创建/更新团队（body 为团队 JSON）
 | DELETE | `/api/teams/{slug}` | 删除团队
@@ -155,7 +174,7 @@ PH_LIVE=1 node tests/test_console_browser.js      # 真实浏览器 + 真跑一�
 
 ## 已知限制 / 路线图
 
-- `conf.py` 中 `enable_cron` 为预留开关；`enable_subagent` / `enable_sandbox` 已实现（subagent 工具 / sandbox 模式）；`enable_team` 已实现（团队圆桌编排）。
+- `enable_subagent` / `enable_team` / `enable_skills` / `enable_skill_auto_discover` 均已接线；定时任务（cron）与沙箱隔离（sandbox）尚未实现，已从功能开关列表移除。
 - 上下文压缩（`context.compress_threshold`）目前仅做统计展示，未真正裁剪历史。
 - RAG / MCP / 长期记忆 / tracing 等高级能力尚未接入，待后续扩展。
 
