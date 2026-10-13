@@ -442,6 +442,9 @@ async def run_team_stream(
 
     await _emit({"phase": "start", "team": team_name, "task": task})
 
+    # 受限并发：与圆桌 / pipeline 一致，避免一次 gather 太多成员把模型端点撑爆。
+    sem = asyncio.Semaphore(max(int(max_concurrent or 4), 1))
+
     async def run_member(m):
         mid = m.get("name", "?")
         await _emit({
@@ -450,36 +453,37 @@ async def run_team_stream(
             "role": m.get("role", ""),
             "color": m.get("color", "#888888"),
         })
-        try:
-            retries = int(cfg.get("agent", {}).get("team_retries", 2))
-            out, attempts = await _run_member_with_retry(
-                lambda m=m: build_team_agent(m, cfg, workspace_dir),
-                task, member_timeout, retries=retries,
-            )
-            if attempts > 1:
-                await _emit({"phase": "member_retrying", "member": mid, "attempts": attempts})
-            await _emit({"phase": "member_done", "member": mid, "bytes": len(out)})
-            return {
-                "member": mid,
-                "role": m.get("role", ""),
-                "color": m.get("color", "#888888"),
-                "prompt": m.get("prompt", ""),
-                "output": out,
-                "status": "ok",
-            }
-        except asyncio.CancelledError:
-            raise
-        except Exception as e:
-            await _emit({"phase": "member_error", "member": mid, "error": str(e)})
-            return {
-                "member": mid,
-                "role": m.get("role", ""),
-                "color": m.get("color", "#888888"),
-                "prompt": m.get("prompt", ""),
-                "output": "",
-                "error": str(e),
-                "status": "error",
-            }
+        async with sem:
+            try:
+                retries = int(cfg.get("agent", {}).get("team_retries", 2))
+                out, attempts = await _run_member_with_retry(
+                    lambda m=m: build_team_agent(m, cfg, workspace_dir),
+                    task, member_timeout, retries=retries,
+                )
+                if attempts > 1:
+                    await _emit({"phase": "member_retrying", "member": mid, "attempts": attempts})
+                await _emit({"phase": "member_done", "member": mid, "bytes": len(out)})
+                return {
+                    "member": mid,
+                    "role": m.get("role", ""),
+                    "color": m.get("color", "#888888"),
+                    "prompt": m.get("prompt", ""),
+                    "output": out,
+                    "status": "ok",
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                await _emit({"phase": "member_error", "member": mid, "error": str(e)})
+                return {
+                    "member": mid,
+                    "role": m.get("role", ""),
+                    "color": m.get("color", "#888888"),
+                    "prompt": m.get("prompt", ""),
+                    "output": "",
+                    "error": str(e),
+                    "status": "error",
+                }
 
     results = await asyncio.gather(*[run_member(m) for m in members])
 
