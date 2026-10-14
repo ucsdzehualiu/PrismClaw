@@ -697,6 +697,28 @@ async def _emit_context_snapshot(q, agent, viz, user_text, token_budget):
     except Exception:
         total_est = sum(len(str(getattr(m, "content", ""))) for m in mem_msgs)
 
+    # 真实容量以模型的 context_size 为准（框架压缩阈值 = trigger_ratio × context_size）；
+    # config 的 context.token_budget 仅在模型未暴露 context_size 时兜底。
+    ctx_size, trigger = 0, 0.8
+    try:
+        ctx_size = int(getattr(agent.model, "context_size", 0) or 0)
+        trigger = float(getattr(agent.context_config, "trigger_ratio", 0.8))
+    except Exception:
+        pass
+    budget = ctx_size or token_budget
+    compress_at = int(trigger * ctx_size) if ctx_size else 0
+
+    # 本轮是否发生压缩：框架把压缩摘要写进 AgentState.summary
+    summary = ""
+    try:
+        raw = agent.state.summary
+        if isinstance(raw, str):
+            summary = raw
+        elif raw:
+            summary = "\n".join(getattr(b, "text", "") or "" for b in raw).strip()
+    except Exception:
+        summary = ""
+
     sys_tokens_est = len(actual_system)
     try:
         viz.set_tokens(TokenStats(
@@ -704,9 +726,11 @@ async def _emit_context_snapshot(q, agent, viz, user_text, token_budget):
             history_tokens=max(total_est - sys_tokens_est, 0),
             input_tokens=len(user_text),
             total_tokens=total_est,
-            budget=token_budget,
-            pct=round(total_est / token_budget * 100, 1) if token_budget else 0,
+            budget=budget,
+            pct=round(total_est / budget * 100, 1) if budget else 0,
+            compressed=bool(summary),
         ))
+        viz.set_compression(summary, compress_at)
         viz.set_system_context(actual_system, mem_msgs)
         await q.put({"type": "context_view", "data": viz.to_event(), "msg_id": "ctx"})
     except Exception as e:

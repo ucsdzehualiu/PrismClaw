@@ -29,7 +29,7 @@ python server.py
 
 直接在输入框打字，Enter 发送，Shift+Enter 换行。右侧两块面板会实时展开：
 
-- **上下文轨迹**：模型这一步实际「看到」了什么（System Prompt、历史、工具定义、Token 用量）
+- **上下文轨迹**：模型这一步实际「看到」了什么（System Prompt、历史、工具定义、Token 用量）。历史超过模型窗口阈值（`llm.context_size`）时，框架会自动把旧历史压成摘要，这里会显示「⚠️ 本轮已触发上下文压缩」并可展开看摘要全文。
 - **工具轨迹**：按执行顺序列出每次工具调用与结果
 
 写文件 / 跑命令这类高风险操作会弹**确认卡片**，点「允许」才真正执行；也可在输入框发 `/approve`、`/reject`。
@@ -159,6 +159,7 @@ PH_LIVE=1 node tests/test_console_browser.js
 | `test_console_widget.js` | 16 项：面板 HTML（类型/阶段进度/耗时/收起展开/同名成员区分/引号转义） | <1s | 否 |
 | `test_console_browser.js` | 12 项：真 Chrome 加载页面、console 无报错、真 DOM 里面板渲染与交互 | ~15s | 否 |
 | `PH_LIVE=1` 上面那条 | +5 项：真的点 🎭 → 选团队（评审团）→ 运行，验证面板与报告真的出现 | ~1-2min | 是（3 次小调用） |
+| `smoke_compress_live.py` | 上下文压缩：把模型窗口调小 → 发长消息 → 断言压缩触发、快照如实上报 | ~10s | 是（1-2 次小调用） |
 
 **要点**
 

@@ -1939,6 +1939,7 @@ function updateContextView(data) {
   if (d.token_stats) modelContextMeta.token_stats = d.token_stats;
   if (d.full_system) modelContextMeta.full_system = d.full_system;
   if (d.user_input) modelContextMeta.user_input = d.user_input;
+  modelContextMeta.compression_summary = d.compression_summary || '';
 
   // 统一到单一面板：退役旧的 contextData 第二面板，避免两个"模型上下文"叠加显示。
   if (contextData) contextData.style.display = 'none';
@@ -2088,11 +2089,21 @@ function renderModelSteps() {
       const ts = meta.token_stats;
       const pct = ts.pct || 0;
       const cls = pct > 80 ? 'danger' : pct > 60 ? 'warn' : 'safe';
+      const thr = ts.threshold || 0;
       h += `<div class="token-bar">
-        <div class="bar-label"><span>Token 预算</span><span>${(ts.total||0).toLocaleString()} / ${(ts.budget||0).toLocaleString()}</span></div>
+        <div class="bar-label"><span>上下文窗口</span><span>${(ts.total||0).toLocaleString()} / ${(ts.budget||0).toLocaleString()}</span></div>
         <div class="bar-track"><div class="bar-fill ${cls}" style="width:${Math.min(pct,100)}%"></div></div>
-        <div class="bar-detail"><span>Sys: ${(ts.system||0).toLocaleString()}</span><span>Hist: ${(ts.history||0).toLocaleString()}</span><span>${pct}%</span></div>
+        <div class="bar-detail"><span>Sys: ${(ts.system||0).toLocaleString()}</span><span>Hist: ${(ts.history||0).toLocaleString()}</span>${thr ? `<span>压缩阈值: ${thr.toLocaleString()}</span>` : ''}<span>${pct}%</span></div>
       </div>`;
+      if (ts.compressed) {
+        h += `<div class="context-block">
+          <div class="block-header" onclick="this.parentElement.classList.toggle('open')">
+            <span>⚠️ 本轮已触发上下文压缩（摘要 ${(ts.summary_chars||0).toLocaleString()} 字）</span>
+            <span class="size">旧历史已压成摘要</span>
+          </div>
+          <div class="block-body" style="max-height:400px">${escapeHtml(meta.compression_summary || '')}</div>
+        </div>`;
+      }
     }
     if (meta.full_system) {
       h += `<div class="context-block">

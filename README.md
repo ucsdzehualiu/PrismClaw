@@ -9,7 +9,7 @@
 - **HITL 工具确认**：写文件 / 插入文件 / 执行命令 / 下载文件 等高风险操作，执行前弹确认卡片，你 `/approve` 才真正运行；超时自动拒绝，避免进程挂起。
 - **实时流式 + 可打断**：基于 FastAPI + SSE，文本 / 工具调用 / 结果实时流式回传；界面停止按钮或 `/stop` 随时中断生成。
 - **内置工具集**：命令执行（PowerShell / Git Bash）、网页抓取（含 GitHub README 自动解析）、联网搜索（国内可用，天气 / 必应兜底）、技能管理、文件下载。
-- **多轮上下文真实累积**：单会话复用同一 Agent 实例，多轮对话上下文持续累积。
+- **多轮上下文真实累积 + 自动压缩**：单会话复用同一 Agent 实例，上下文持续累积；超过模型窗口阈值（`llm.context_size × compress_threshold`）时，框架自动把旧历史压成摘要，面板可见。
 - **人格系统**：通过 `workspace/` 下的 AGENTS / SOUL / USER / IDENTITY 文件定制 Agent 人格，可在界面读取与更新。
 - **会话透明日志**：每轮生成可读 Markdown + 结构化 JSON 快照，落盘到 `session_logs/`。
 - **团队编排（多智能体）**：把任务分发给多名带独立人格/提示词的成员，按**阶段**执行后汇总成报告。三种类型：**并行**（成员同时分析 → lead 汇总）、**圆桌**（分析 → 风控 → 决策）、**多阶段 pipeline**（自定义阶段序列，阶段内并行、阶段间传递产出，`final:"last"` 末阶段即交付物 / `final:"lead"` 再由主理人汇总）。点输入框左侧「🎭 团队」选一个团队即可运行（团队菜单是浮层，选中后**复用同一个输入框**填任务，回车即跑），或发 `/team <团队名> <任务>`。项目自带 13 套团队（其中 12 套从外部专家团移植，见 [`PORTING.md`](PORTING.md)），团队配置放 `teams/`（内置）或 `workspace/teams/`（自建，同名覆盖内置），结果落盘到 `session_logs/<sid>/teams/run_<时间>/`。
@@ -150,6 +150,12 @@ python tests/smoke_server.py                      # FastAPI + SSE /approve 续�
 - 工具调用按 `tool_call_id` 归并：增量 delta 累积，到 `ToolCallEndEvent` 才 emit 一次。
 - 每 7 秒推一条心跳，绝不静默。
 
+### 上下文压缩（框架自带）
+- 真正的容量上限是 **`llm.context_size`（模型上下文窗口）**。当 token 数超过 `context_size × context.compress_threshold`（默认 0.8）时，AgentScope 2.0 会在**每次推理前**自动把较早的历史压成一份结构化摘要（写进 `AgentState.summary`），只保留最近一段原文；不依赖模型"自觉"。
+- 压缩结果会出现在下一轮的**上下文面板**（「⚠️ 本轮已触发上下文压缩」+ 摘要全文），并写进 `session_logs/` 的快照 Markdown。
+- ⚠️ 想提升容量要改 **`llm.context_size`**（设置页可改），**不是** `context.token_budget`——后者只是面板的展示兜底值。
+- 冒烟：`python tests/smoke_compress_live.py [provider]`（把窗口调小 → 发长消息 → 断言压缩触发且快照如实上报）。
+
 ## HTTP API
 
 | 方法 | 路径 | 说明 |
@@ -175,7 +181,7 @@ python tests/smoke_server.py                      # FastAPI + SSE /approve 续�
 ## 已知限制 / 路线图
 
 - `enable_subagent` / `enable_team` / `enable_skills` / `enable_skill_auto_discover` 均已接线；定时任务（cron）与沙箱隔离（sandbox）尚未实现，已从功能开关列表移除。
-- 上下文压缩（`context.compress_threshold`）目前仅做统计展示，未真正裁剪历史。
+- 上下文压缩已接入（由 AgentScope 2.0 框架自动执行，见上「上下文压缩」）；容量上限以 `llm.context_size` 为准。
 - RAG / MCP / 长期记忆 / tracing 等高级能力尚未接入，待后续扩展。
 
 ## 调试

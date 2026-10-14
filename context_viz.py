@@ -84,6 +84,8 @@ class RoundContext:
     skill_loads: List[SkillLoadRecord] = field(default_factory=list)
     context_changes: List[str] = field(default_factory=list)
     llm_output: str = ""
+    # 本轮若发生框架级上下文压缩，这里是压缩摘要（AgentState.summary）
+    summary: str = ""
     # 完整 Prompt：模型本轮实际看到的全部 messages（含 system 全文 + 历史）
     full_system: str = ""
     full_messages: List[Dict[str, Any]] = field(default_factory=list)
@@ -126,6 +128,18 @@ class ContextViz:
     def set_tokens(self, stats: TokenStats):
         """记录 Token 统计。"""
         self._current.token_stats = stats
+
+    def set_compression(self, summary: str = "", threshold: int = 0):
+        """记录本轮的上下文压缩状态：summary 非空即发生过压缩。
+
+        压缩由 AgentScope 2.0 框架在每次推理前自动执行（阈值 =
+        trigger_ratio × 模型 context_size），这里只是如实反映结果。
+        """
+        self._current.summary = summary or ""
+        self._current.token_stats.compress_info = {
+            "threshold": int(threshold or 0),
+            "summary_chars": len(self._current.summary),
+        }
 
     def add_tool_call(self, step: int, name: str, params: dict, result: Any = None) -> ToolCallRecord:
         """记录工具调用，返回记录对象以便后续回填。"""
@@ -328,7 +342,10 @@ class ContextViz:
                 "budget": c.token_stats.budget,
                 "pct": c.token_stats.pct,
                 "compressed": c.token_stats.compressed,
+                "threshold": c.token_stats.compress_info.get("threshold", 0),
+                "summary_chars": c.token_stats.compress_info.get("summary_chars", 0),
             },
+            "compression_summary": c.summary,
             "tool_calls": [
                 {"step": t.step, "tool": t.tool_name, "params": t.params, "result": t.result}
                 for t in c.tool_calls
@@ -403,8 +420,14 @@ class ContextViz:
             "",
         ])
         if ts.compressed:
-            lines.append(f"> ⚠️ 本轮发生上下文压缩")
+            thr = ts.compress_info.get("threshold", 0)
+            lines.append(f"> ⚠️ 本轮发生上下文压缩（触发阈值 {thr:,} tokens，摘要 {ts.compress_info.get('summary_chars', 0):,} 字）")
             lines.append("")
+            if c.summary:
+                lines.append("### 压缩摘要")
+                lines.append("")
+                lines.append(c.summary)
+                lines.append("")
 
         lines.extend([
             "## 3. 消息预览",

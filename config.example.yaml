@@ -6,6 +6,9 @@ llm:
   provider: "dsv4-local"
   temperature: 0.0
   enable_thinking: false
+  # 模型上下文窗口（tokens）。这才是真正的容量上限——框架在
+  # context_size × context.compress_threshold 处自动压缩历史。按实际模型填。
+  context_size: 128000
 
 providers:
   dsv4-local:
@@ -24,7 +27,9 @@ agent:
   team_retries: 3            # 成员被打断时的重建重试次数
 
 context:
+  # 仅"预算"展示的兜底值；模型暴露 context_size 时以 llm.context_size 为准
   token_budget: 420000
+  # 压缩触发比：token 数超过 context_size × 该值 时，框架自动把旧历史压成摘要
   compress_threshold: 0.8
   keep_recent_messages: 6
 

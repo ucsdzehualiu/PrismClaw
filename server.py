@@ -37,7 +37,7 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
 
 # 配置文件里可安全通过设置页编辑的字段白名单（其余字段原样保留）
 CONFIG_EDITABLE = {
-    "llm": {"provider", "temperature", "enable_thinking"},
+    "llm": {"provider", "temperature", "enable_thinking", "context_size"},
     "providers": {"api_key", "api_base", "model", "enable_thinking"},
     "agent": {"max_iters", "parallel_tool_calls",
               "token_budget", "compress_threshold", "keep_recent_messages"},
