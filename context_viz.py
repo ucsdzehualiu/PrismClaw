@@ -363,6 +363,14 @@ class ContextViz:
         """落盘：生成 Markdown 日志 + JSON 快照，返回 Markdown 路径。"""
         c = self._current
 
+        # __init__ 里建过目录，但会话可能在中途被删（前端「删除会话」会 rmtree），
+        # 那时再写就 FileNotFoundError —— 抛在 session 收尾路径上会让整个会话循环挂掉
+        # （见 prism_harness_agent.agent_runner），所以这里补建一次。
+        try:
+            os.makedirs(os.path.join(self.session_dir, "snapshots"), exist_ok=True)
+        except OSError:
+            pass
+
         # JSON 快照
         jpath = os.path.join(self.session_dir, "snapshots", f"round_{c.round_num:03d}.json")
         with open(jpath, "w", encoding="utf-8") as f:

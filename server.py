@@ -27,13 +27,52 @@ from pydantic import BaseModel
 import conf
 from conf import console
 from prism_harness_agent import get_or_create_agent, SESS_MGR
-from model_config import load_config
+from model_config import load_config, optional_temperature
 from tools import load_persona_file
 
 # 项目根目录：无论从哪里启动 server，都定位到 server.py 所在目录
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORKSPACE_DIR = os.path.join(BASE_DIR, "workspace")
 CONFIG_PATH = os.path.join(BASE_DIR, "config.yaml")
+
+# 本进程 stdout/stderr 落到的日志文件（见 _capture_server_output）
+SERVER_LOG_PATH = os.path.join(BASE_DIR, "server.out.log")
+
+
+def _capture_server_output():
+    """把 server 进程的 stdout/stderr 落到日志文件。
+
+    为什么必须做（2026-10-16 用 py-spy 定位）：Windows 控制台进入「快速编辑」
+    选中态后，向它 write 会**阻塞**。而 conf.console() 的 print 与第三方库
+    （AgentScope 技能加载器的 logger.warning）都是在**事件循环线程**上直接写
+    stdout/stderr 的——控制台一旦被选中（点一下窗口就会），事件循环就永久卡死
+    在 write() 里：TCP 能连上但拿不到任何 HTTP 响应，团队/对话表现为「一直不动」。
+    抓到的调用栈正是 logging.emit → stream.write。
+
+    重定向到文件后，控制台处于什么状态都拖不垮事件循环。
+    只在本文件作为脚本运行时执行（`python server.py`）——测试 import server 不受影响。
+    """
+    # 简单轮转：超过 8MB 就挪成 .1 重开（uvicorn 访问日志会慢慢长大）
+    try:
+        if os.path.exists(SERVER_LOG_PATH) and os.path.getsize(SERVER_LOG_PATH) > 8 * 1024 * 1024:
+            os.replace(SERVER_LOG_PATH, SERVER_LOG_PATH + ".1")
+    except OSError:
+        pass
+
+    try:
+        f = open(SERVER_LOG_PATH, "a", encoding="utf-8", buffering=1)
+    except Exception:
+        return
+    # dup2 让所有已捕获的 fd 1/2 引用（含 logging 早期建好的 handler）一起改道；
+    # 再重新绑定 sys.stdout/sys.stderr 覆盖走 Python 对象的那条路。
+    try:
+        os.dup2(f.fileno(), 1)
+        os.dup2(f.fileno(), 2)
+    except Exception:
+        pass
+    sys.stdout = f
+    sys.stderr = f
+
 
 # 配置文件里可安全通过设置页编辑的字段白名单（其余字段原样保留）
 CONFIG_EDITABLE = {
@@ -234,8 +273,21 @@ async def update_config(request: Request):
 
     # llm（顶层标量）
     if isinstance(body.get("llm"), dict):
+        incoming = _mask_dict(body["llm"], editable["llm"])
         llm = on_disk.get("llm", {}) or {}
-        llm.update(_mask_dict(body["llm"], editable["llm"]))
+        if "temperature" in incoming:
+            # 留空（null / ""）= 不下发该参数、由模型端点决定采样温度。
+            # 实现上是把这个键从 yaml 里**删掉**：写回用的是 dict.update 合并，
+            # 留着旧键的话「清空」反而会继续沿用上一轮的温度。非法值当场打回。
+            try:
+                temp = optional_temperature(incoming.pop("temperature"))
+            except ValueError as e:
+                return {"status": "error", "message": str(e)}
+            if temp is None:
+                llm.pop("temperature", None)
+            else:
+                llm["temperature"] = temp
+        llm.update(incoming)
         on_disk["llm"] = llm
 
     # providers（嵌套：每个 provider 过滤白名单字段）
@@ -287,7 +339,7 @@ async def get_status():
             "model": prov.get("model", ""),
             "api_base": prov.get("api_base", ""),
             "has_api_key": bool(prov.get("api_key")),
-            "temperature": cfg.get("llm", {}).get("temperature", 0.0),
+            "temperature": cfg.get("llm", {}).get("temperature"),
             "enable_thinking": cfg.get("llm", {}).get("enable_thinking", False),
         },
         "env": {
@@ -589,5 +641,8 @@ async def stop(session_id: str, request_id: str):
 if __name__ == "__main__":
     host = server_cfg.get("host", "127.0.0.1")
     port = server_cfg.get("port", 8765)
+    # 先告知日志去向（此时还写在控制台），再改道到文件——避免控制台被选中时卡死事件循环
+    print(f"[*] 服务日志写入 {SERVER_LOG_PATH}（控制台不再接收 server 输出）", flush=True)
+    _capture_server_output()
     console("[start]", f"http://{host}:{port}")
     uvicorn.run(app, host=host, port=port)

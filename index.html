@@ -228,6 +228,26 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .bubble pre{background:#101013;border:1px solid var(--border-l1);padding:12px;border-radius:var(--radius-sm);
   overflow-x:auto;margin:8px 0;font-size:12.5px;line-height:1.55}
 .bubble pre code{background:none;padding:0}
+/* markdown 块级元素：表格 / 标题 / 引用 / 分隔线 / 列表。
+   旧渲染器不认这些，团队报告里的表格、# 标题、> 引用、--- 全漏成原始记号。 */
+.bubble p{margin:6px 0}
+.bubble h2,.bubble h3,.bubble h4,.bubble h5,.bubble h6{margin:12px 0 6px;line-height:1.35;font-weight:600}
+.bubble h2{font-size:16px}
+.bubble h3{font-size:15px}
+.bubble h4,.bubble h5,.bubble h6{font-size:14px}
+.bubble hr{border:0;border-top:1px solid var(--border-l1);margin:12px 0}
+.bubble blockquote{margin:8px 0;padding:7px 12px;border-left:3px solid var(--accent);
+  background:rgba(127,127,127,.08);border-radius:0 var(--radius-sm) var(--radius-sm) 0;
+  color:var(--text-secondary,#cfcfcf)}
+.bubble ul,.bubble ol{margin:6px 0;padding-left:22px}
+.bubble li{margin:2px 0}
+/* 宽表格自己横向滚动，别把气泡/卡片撑破 */
+.md-table{overflow-x:auto;margin:8px 0;border:1px solid var(--border-l1);border-radius:var(--radius-sm)}
+.bubble table{border-collapse:collapse;font-size:12.5px;min-width:100%}
+.bubble th,.bubble td{border-bottom:1px solid var(--border-l1);padding:6px 10px;
+  text-align:left;vertical-align:top;white-space:normal}
+.bubble th{background:rgba(79,142,247,.10);font-weight:600;white-space:nowrap}
+.bubble tbody tr:last-child td{border-bottom:0}
 
 /* ---- Tool card ---- */
 .tool-card{margin:8px 0;border-radius:var(--radius-sm);border:1px solid var(--border-l1);
@@ -520,6 +540,12 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .team-panel .tp-toggle:hover{color:var(--text-primary,#e6e6e6);border-color:rgba(127,127,127,.55)}
 .team-panel .tp-collapsed-sum{font-size:11.5px;color:var(--text-tertiary,#999);padding:1px 0 3px}
 .team-panel .tp-row.error .tp-name{color:var(--danger,#ef4444)}
+/* 排队等并发名额的成员：整行压暗，和「正在跑」一眼分开（19 人圆桌只跑 4 个并发时最明显） */
+.team-panel .tp-row.queued{opacity:.55}
+.team-panel .tp-row.queued .tp-dot{filter:grayscale(1)}
+/* 用户点停止时被取消的成员：压暗 + 名字转灰，别和「跑完了」「出错了」混在一起 */
+.team-panel .tp-row.cancelled{opacity:.65}
+.team-panel .tp-row.cancelled .tp-name{color:var(--text-tertiary,#999)}
 
 /* 报告卡片（最终决策 / 风险评估 等结构化输出）——可折叠/展开 */
 .report-card{margin-top:6px;border:1px solid rgba(127,127,127,.22);border-radius:10px;overflow:hidden;background:rgba(127,127,127,.05)}
@@ -529,6 +555,8 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
 .report-toggle:hover{background:rgba(127,127,127,.12)}
 .report-body{padding:10px 12px;max-height:60vh;overflow:auto;color:var(--text-primary,#ddd)}
 .report-body.collapsed{display:none}
+/* 独立阶段产出的容器（圆桌的风险评估等），排在团队面板与最终报告之间 */
+.stage-report{margin-top:6px}
 
 
 
@@ -769,8 +797,10 @@ body{font-family:var(--font-sans);background:var(--bg-base);color:var(--text-pri
               <div class="sg-title">LLM / Agent 参数</div>
               <div class="setting-row">
                 <label for="llm_temperature">Temperature</label>
-                <input class="field" id="llm_temperature" type="number" step="0.1" min="0" max="2">
+                <input class="field" id="llm_temperature" type="number" step="0.1" min="0" max="2"
+                       placeholder="留空=模型端点默认">
               </div>
+              <div class="setting-hint" style="margin:-2px 0 8px">留空即不向模型下发 temperature，由模型端点决定采样温度。范围 0~2；0 是完全贪心（很确定），值越大越发散。</div>
               <div class="setting-row">
                 <label for="agent_iters">最大迭代轮数 (max_iters)</label>
                 <input class="field" id="agent_iters" type="number" step="1" min="1">
@@ -1304,25 +1334,59 @@ function addUserMessage(text) {
   scrollChat(true);
 }
 
-// 检测是否为结构化报告（最终决策 / 风险评估 等，以 [xxx报告] 或 [xxx决策] 收尾/包含）
-function isReportText(t) {
-  return /\[(?:最终决策|最终决策报告|风险评估|风险评估报告|决策报告|分析报告) *\]/.test(t || '');
+// 报告标记：团队 prompt 让成员在最后一行产出 [xxx决策] / [xxx报告]。
+// 各团队的措辞并不统一——[最终投资决策]、[最终决策报告]、[交易员决策]、
+// [风险评估报告]、[新闻分析报告]、[最终交易决策]……枚举固定文案注定漏（
+// 「[最终投资决策]」就这么漏掉了，报告一直没被渲染成卡片）。
+// 改成认「方括号里含 决策 / 报告」，检测与取名共用同一条正则。
+const REPORT_TAG_SRC = '\\[([^\\]\\n]{0,18}(?:决策|报告))\\]';
+const REPORT_TAG_RE = new RegExp(REPORT_TAG_SRC, 'g');
+function reportTagsOf(t) {
+  return [...String(t || '').matchAll(REPORT_TAG_RE)]
+    .map(m => (m[1] || '').trim()).filter(Boolean);
 }
+function isReportText(t) { return reportTagsOf(t).length > 0; }
+// 一条消息里可能拼进多个标记（例如圆桌的风险评估 + 最终决策），取**最后**一个当标题：
+// prompt 要求的就是「最后一行用产出标记」，最后一个才是这份内容的定性。
 function reportTagOf(t) {
-  const m = (t || '').match(/\[([^\]]*(?:决策|报告)[^\]]*)\]/);
-  return (m ? m[1] : '报告').trim() || '报告';
+  const tags = reportTagsOf(t);
+  return tags.length ? tags[tags.length - 1] : '报告';
+}
+// 卡片正文：清掉机器痕迹与排版噪音，让卡片里只剩内容。
+//  - 产出标记连同**可能包着它的反引号**一起去掉。prompt 常要求写成 `[xxx报告]`，
+//    只删方括号会剩下两个空反引号「 `` 」，看着就像一句没写完的残句。
+//  - 首尾的 --- 分隔线是文档级装饰，孤零零挂在卡片头下面没有意义。
+//  - 正文顶上的标题若与卡片标题重复，去掉（卡片头已经写了一遍）。
+function reportBodyOf(content, tag) {
+  let s = String(content || '');
+  s = s.replace(/`?[ \t]*\[[^\]\n]{0,18}(?:决策|报告)\][ \t]*`?/g, '');
+  s = s.replace(/\n{3,}/g, '\n\n');
+  s = s.replace(/^[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*\n/, '');
+  s = s.replace(/\n[ \t]*(?:-{3,}|\*{3,}|_{3,})[ \t]*$/, '');
+  s = s.trim();
+  if (tag) {
+    s = s.replace(/^[ \t]*#[ \t]+(.+?)[ \t]*(\n|$)/, (m, title) =>
+      (title.indexOf(tag) >= 0 ? '' : m));
+    s = s.trim();
+  }
+  return s;
+}
+// 一张可折叠报告卡片的 HTML。assistant 正文与独立阶段产出（如圆桌的风险评估）
+// 共用它，保证两种来路的卡片长得一样、折叠行为也一致。
+function reportCardHTML(tag, bodyHtml) {
+  return '<div class="report-card">' +
+    '<div class="report-head">' +
+      '<span class="report-tag">📄 ' + escapeHtml(tag) + '</span>' +
+      '<span class="report-toggle" onclick="toggleReportCard(this)" title="折叠/展开">收起 ▴</span>' +
+    '</div>' +
+    '<div class="report-body">' + bodyHtml + '</div>' +
+    '</div>';
 }
 // 渲染 assistant 内容：可折叠报告卡片（若匹配报告标记），否则普通 markdown
 function renderAssistantContent(content) {
   if (!isReportText(content)) return renderMarkdown(content);
-  const tag = escapeHtml(reportTagOf(content));
-  return '<div class="report-card">' +
-    '<div class="report-head">' +
-      '<span class="report-tag">📄 ' + tag + '</span>' +
-      '<span class="report-toggle" onclick="toggleReportCard(this)" title="折叠/展开">收起 ▴</span>' +
-    '</div>' +
-    '<div class="report-body">' + renderMarkdown(content) + '</div>' +
-    '</div>';
+  const tag = reportTagOf(content);
+  return reportCardHTML(tag, renderMarkdown(reportBodyOf(content, tag)));
 }
 function toggleReportCard(btn) {
   const body = btn && btn.closest && btn.closest('.report-head') ? btn.closest('.report-head').nextElementSibling : null;
@@ -1357,6 +1421,7 @@ function updateAssistantContent(asstId, content) {
 
 // ---------- 团队编排实时小组件 ----------
 let teamWidgetEl = null;
+const stageReportEls = {};   // asstId::stage -> 该阶段产出卡片元素（如圆桌的风险评估）
 let teamMembers = {};   // key -> {name,stage,stageLabel,role,color,status,detail,summary}
 let teamStages = [];    // [{stage,label,status:'idle'|'running'|'done'}]
 let teamPhase = '';     // '' | 'running' | 'synthesis' | 'done'
@@ -1391,6 +1456,26 @@ function teamWidgetContainer(asstId) {
   return teamWidgetEl;
 }
 function stopTeamTimer() { if (teamTimer) { clearInterval(teamTimer); teamTimer = null; } }
+
+// 用户点「停止」时，本地把团队面板收尾。
+// stopGeneration 会先 abort 掉 SSE —— 这意味着服务端在取消路径上补发的 member_error
+// 事件我们**收不到**，而 run_member 本身在取消时不发事件。不收尾的话，那些成员行会
+// 永远停在「⏳ 分析中…」、计时器还在跑，用户以为「停止」按钮根本没生效。
+function cancelTeamWidget() {
+  const keys = Object.keys(teamMembers);
+  if (!keys.length) return;
+  keys.forEach(k => {
+    const m = teamMembers[k];
+    if (m.status === 'running' || m.status === 'queued') {
+      m.status = 'cancelled';
+      m.detail = '⛔ 已取消';
+    }
+  });
+  teamStages.forEach(s => { if (s.status === 'running') s.status = 'idle'; });
+  teamPhase = 'done';
+  stopTeamTimer();
+  if (teamWidgetAsstId) renderTeamWidget(teamWidgetAsstId);
+}
 // 秒级刷新「已用时」：只改一个文本节点，不重渲染面板（重渲染会打扰滚动/展开状态）
 function startTeamTimer() {
   stopTeamTimer();
@@ -1409,18 +1494,49 @@ function resetTeamWidget() {
   teamWidgetEl = null; teamMembers = {}; teamStages = []; teamPhase = '';
   teamExpanded = {}; teamWidgetAsstId = null; teamKind = ''; teamStartTs = 0;
   teamName = ''; teamStageTotal = 0; teamCollapsed = false; stopTeamTimer();
+  // 上一轮挂着的阶段产出卡片元素已随旧气泡留在历史里，这里只清登记表，
+  // 免得越攒越多（DOM 本身不用动）。
+  Object.keys(stageReportEls).forEach(k => delete stageReportEls[k]);
 }
 function teamStageLabel(stage) {
   return ({analysis:'🔍 各方分析', risk:'🛡️ 风险·风控', decision:'🎯 决策'})[stage] || stage;
 }
-function teamKindLabel(kind) {
-  return ({
-    pipeline: '多阶段管线', roundtable: '两阶段圆桌', analysis: '两阶段圆桌',
-    parallel: '并行圆桌',
-  })[kind] || '团队编排';
+// 类型名别把阶段数写死：圆桌既可能是「分析→决策」两段，也可能是
+// 「分析→风控→决策」三段。写死「两阶段圆桌」就会出现
+// 「两阶段圆桌 · 阶段 3/3」这种自相矛盾的标题（轻量版圆桌就是这样）。
+function teamKindLabel(kind, stageCount) {
+  const n = Number(stageCount) || 0;
+  if (kind === 'roundtable' || kind === 'analysis') {
+    return n ? ('圆桌 · ' + n + ' 阶段') : '圆桌';
+  }
+  return ({ pipeline: '多阶段管线', parallel: '并行圆桌' })[kind] || '团队编排';
 }
 // 成员行按「阶段::成员」唯一化——同一成员在多阶段出现时各占一行，不互相覆盖
 function teamMemberKey(ev) { return ev.stage ? (ev.stage + '::' + ev.member) : ev.member; }
+
+// 独立阶段的产出卡片（例如圆桌的「风险管理师评估」）。
+// 插在团队面板之后、最终报告（气泡）之前，让「分析 → 风控 → 决策」的阅读顺序成立。
+//
+// 为什么不塞进 assistant 文本流：同一轮对话的所有文本会被 rebuildAssistantMessage
+// 拼进同一个气泡，塞进去只会得到一张把风控和决策混在一起的卡片，读者分不清
+// 哪段是约束、哪段是结论。所以阶段产出走自己的 DOM 节点。
+function renderStageReport(asstId, ev) {
+  const parent = document.getElementById(asstId);
+  if (!parent || !ev || !ev.text) return;
+  const key = asstId + '::' + (ev.stage || 'report');
+  let el = stageReportEls[key];
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'stage-report';
+    const bubble = document.getElementById(asstId + '-bubble');
+    if (bubble) parent.insertBefore(el, bubble);   // 排在最终报告之前
+    else parent.appendChild(el);
+    stageReportEls[key] = el;
+  }
+  const tagged = isReportText(ev.text);
+  const tag = tagged ? reportTagOf(ev.text) : (ev.label || '阶段报告');
+  el.innerHTML = reportCardHTML(tag, renderMarkdown(tagged ? reportBodyOf(ev.text, tag) : String(ev.text)));
+}
 function handleTeamEvent(ev, asstId) {
   if (!ev || !ev.phase) return;
   const phase = ev.phase;
@@ -1442,6 +1558,20 @@ function handleTeamEvent(ev, asstId) {
   else if (phase === 'stage_done') {
     teamStages.forEach(s => { if (s.stage === ev.stage) s.status = 'done'; });
   }
+  else if (phase === 'stage_report') {
+    // 单代理阶段的正文（圆桌的「风险管理师评估」等）：单独一张卡片，
+    // 不并进最终报告，免得风控约束和最终结论混成一段。
+    renderStageReport(asstId, ev);
+  }
+  else if (phase === 'member_queued') {
+    const st = teamStages.find(s => s.stage === ev.stage);
+    teamMembers[teamMemberKey(ev)] = {
+      name: ev.member, stage: ev.stage || '',
+      stageLabel: (st && st.label) || '',
+      role: ev.role || '', color: ev.color || '#888888',
+      status: 'queued', detail: '🕒 排队中（并发已满）', summary: '',
+    };
+  }
   else if (phase === 'member_start') {
     const st = teamStages.find(s => s.stage === ev.stage);
     teamMembers[teamMemberKey(ev)] = {
@@ -1453,7 +1583,13 @@ function handleTeamEvent(ev, asstId) {
   }
   else if (phase === 'member_done') {
     const m = teamMembers[teamMemberKey(ev)];
-    if (m) { m.status = 'done'; m.detail = '✅ ' + ev.bytes + ' B'; m.summary = ev.summary || ''; }
+    if (m) {
+      m.status = 'done';
+      // note 例如「跑满迭代上限，以上为强制收尾产出」——这类成员正文是真的但可能被
+      // 截断，必须标注出来，不能让它静默混进「✅ 正常完成」里。
+      m.detail = '✅ ' + ev.bytes + ' B' + (ev.note ? ' · ' + ev.note : '');
+      m.summary = ev.summary || '';
+    }
   }
   else if (phase === 'member_retrying') {
     const m = teamMembers[teamMemberKey(ev)];
@@ -1464,6 +1600,11 @@ function handleTeamEvent(ev, asstId) {
     if (m) { m.status = 'error'; m.detail = ev.error || '执行出错'; }
   }
   else if (phase === 'synthesis_start') teamPhase = 'synthesis';
+  else if (phase === 'canceled') {
+    // 服务端说这次编排被取消了（会话释放 / 超时 / 用户点了停止）→ 面板就地收尾
+    cancelTeamWidget();
+    return;
+  }
   else if (phase === 'synthesis_done' || phase === 'done') {
     teamPhase = 'done';
     stopTeamTimer();
@@ -1485,7 +1626,7 @@ function renderTeamWidget(asstId) {
   keys.forEach(k => { const n = teamMembers[k].name; nameCount[n] = (nameCount[n] || 0) + 1; });
   const stageLabelOf = st => ((teamStages.find(s => s.stage === st) || {}).label) || '';
 
-  let html = '<div class="tp-head">🎭 ' + (teamName ? escapeHtml(teamName) + ' · ' : '') + teamKindLabel(teamKind);
+  let html = '<div class="tp-head">🎭 ' + (teamName ? escapeHtml(teamName) + ' · ' : '') + teamKindLabel(teamKind, teamStageTotal || teamStages.length);
   if (keys.length) html += '（' + keys.length + ' 位成员）';
   if (teamStages.length) {
     const done = teamStages.filter(s => s.status === 'done').length;
@@ -1509,20 +1650,29 @@ function renderTeamWidget(asstId) {
   if (teamCollapsed) {
     const okN = keys.filter(k => teamMembers[k].status === 'done').length;
     const errN = keys.filter(k => teamMembers[k].status === 'error').length;
-    const runN = keys.length - okN - errN;
+    const queN = keys.filter(k => teamMembers[k].status === 'queued').length;
+    const canN = keys.filter(k => teamMembers[k].status === 'cancelled').length;
+    const runN = keys.length - okN - errN - queN - canN;
+    // 「排队」必须和「在跑」分开报：否则 19 人圆桌只跑 4 个并发时，
+    // 折叠摘要写「⏳ 19」会让人以为 19 个都在跑、只是慢。
     html += '<div class="tp-collapsed-sum">成员明细已收起：' +
-      (okN ? '✅ ' + okN : '') + (runN ? (okN ? ' · ' : '') + '⏳ ' + runN : '') +
-      (errN ? ' · ❌ ' + errN : '') + '　（点上方「展开成员」查看每人的产出摘要）</div>';
+      (okN ? '✅ ' + okN : '') + (runN ? (okN ? ' · ' : '') + '⏳ ' + runN + ' 运行中' : '') +
+      (queN ? ((okN || runN) ? ' · ' : '') + '🕒 ' + queN + ' 排队中' : '') +
+      (errN ? ' · ❌ ' + errN : '') + (canN ? ' · ⛔ ' + canN + ' 已取消' : '') +
+      '　（点上方「展开成员」查看每人的产出摘要）</div>';
   } else {
     keys.forEach(k => {
       const m = teamMembers[k];
       const open = teamExpanded[k];
-      const st = m.status === 'done' ? '✅' : (m.status === 'error' ? '❌' : '⏳');
+      const st = m.status === 'done' ? '✅'
+        : (m.status === 'error' ? '❌'
+        : (m.status === 'queued' ? '🕒'
+        : (m.status === 'cancelled' ? '⛔' : '⏳')));
       const arrow = m.summary ? (open ? '▲ 收起' : '▼ 展开') : '';
       let label = m.name;
       const sl = stageLabelOf(m.stage) || m.stageLabel;
       if (nameCount[m.name] > 1 && sl) label += '（' + sl + '）';
-      html += '<div class="tp-row' + (m.status === 'error' ? ' error' : '') + '" data-member="' + escapeAttr(k) + '"' +
+      html += '<div class="tp-row' + (m.status === 'error' ? ' error' : '') + (m.status === 'queued' ? ' queued' : '') + (m.status === 'cancelled' ? ' cancelled' : '') + '" data-member="' + escapeAttr(k) + '"' +
         (m.summary ? ' title="点击查看该位成员的产出摘要"' : '') + '>' +
         '<span class="tp-dot" style="background:' + escapeAttr(m.color || '#888') + '"></span>' +
         '<span class="tp-name">' + escapeHtml(label) + '</span>' +
@@ -2695,12 +2845,15 @@ function handleLiveStatus(st) {
 }
 
 async function stopGeneration() {
-  if (!currentRequestId) return;
+  // 本地先收尾，不依赖 request_id：用户可能在第一个 SSE 事件（带 request_id）到达前
+  // 就点了停止，那时也要能把流掐掉、把按钮收起来，而不是「点了没反应」。
   _stopped = true;
   if (abortController) abortController.abort();
   showStopButton(false);
   setStatus('stopped', '已停止');
-  // 2) 通知后端真正打断 agent 生成
+  cancelTeamWidget();
+  if (!currentRequestId) return;
+  // 通知后端真正打断 agent 生成（AgentScope 的打断＝取消该 reply 的 asyncio 任务）
   try {
     const resp = await fetch(`/stop?session_id=${encodeURIComponent(SESSION_ID)}&request_id=${encodeURIComponent(currentRequestId)}`, { method: 'GET' });
     const r = await resp.json();
@@ -2720,24 +2873,116 @@ function escapeAttr(s) {
   return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
+// 极简 markdown 渲染器（无外部依赖；先 escapeHtml 再拼标签，注入面可控）。
+//
+// 旧版只认代码块 / 粗体 / ## / ###：于是团队报告里最吃重的**表格**，以及
+// # 标题、> 引用、--- 分隔线，全部原样漏成记号——报告越结构化，看着越像
+// 一堆没渲染的文本。这里按「块」解析：代码围栏 / 表格 / 引用 / 标题 / 分隔线 /
+// 有序·无序列表 / 段落，逐行判块后再拼。
 function renderMarkdown(text) {
   if (!text) return '';
-  let s = escapeHtml(text);
-  // Code blocks
-  s = s.replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>');
-  // Inline code
-  s = s.replace(/`([^`]+)`/g, '<code>$1</code>');
-  // Bold
-  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  // Headers
-  s = s.replace(/^### (.+)$/gm, '<h4 style="margin:8px 0 4px">$1</h4>');
-  s = s.replace(/^## (.+)$/gm, '<h3 style="margin:10px 0 4px">$1</h3>');
-  // Lists
-  s = s.replace(/^- (.+)$/gm, '<li>$1</li>');
-  s = s.replace(/(<li>[\s\S]*?<\/li>)/g, '<ul>$1</ul>');
-  // Line breaks
-  s = s.replace(/\n/g, '<br>');
-  return s;
+  const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
+
+  // 行内：代码 → 粗体 → 斜体。顺序不能反：** 要先于单个 * 处理。
+  const inline = s => escapeHtml(s)
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    // 单个 * 只认「两侧非空白」的成对写法，免得把 "10 * 5 * 2" 之类误判成斜体
+    .replace(/(^|[^*])\*([^*\s](?:[^*]*[^*\s])?)\*(?!\*)/g, '$1<em>$2</em>');
+
+  const isFence = l => /^\s*```/.test(l);
+  const isRule = l => /^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(l);
+  const isTableSep = l => /^\s*\|?[:\-|\s]+\|?\s*$/.test(l) && l.includes('-');
+  const splitRow = l => {
+    let t = l.trim();
+    if (t.startsWith('|')) t = t.slice(1);
+    if (t.endsWith('|')) t = t.slice(0, -1);
+    return t.split('|').map(c => c.trim());
+  };
+  const startsBlock = l => !l.trim() || isFence(l) || isRule(l)
+    || /^\s*#{1,6}\s/.test(l) || /^\s*>\s?/.test(l)
+    || /^\s*[-*+]\s+/.test(l) || /^\s*\d+[.)]\s+/.test(l);
+
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // 代码围栏
+    if (isFence(line)) {
+      const buf = [];
+      i++;
+      while (i < lines.length && !isFence(lines[i])) buf.push(lines[i++]);
+      if (i < lines.length) i++;          // 收尾围栏（可能缺失，缺了也不吞后续内容）
+      out.push('<pre><code>' + escapeHtml(buf.join('\n')) + '</code></pre>');
+      continue;
+    }
+
+    if (isRule(line)) { out.push('<hr>'); i++; continue; }
+
+    // 标题：#→h2、##→h3、###→h4……（气泡里从 h2 起步，别再放大）
+    const h = line.match(/^\s*(#{1,6})\s+(.+?)\s*$/);
+    if (h) {
+      const lvl = Math.min(h[1].length + 1, 6);
+      out.push('<h' + lvl + '>' + inline(h[2]) + '</h' + lvl + '>');
+      i++;
+      continue;
+    }
+
+    // 表格：本行含 |，且下一行是分隔行 |---|---|
+    if (line.includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1])) {
+      const head = splitRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        rows.push(splitRow(lines[i++]));
+      }
+      out.push('<div class="md-table"><table><thead><tr>'
+        + head.map(c => '<th>' + inline(c) + '</th>').join('')
+        + '</tr></thead><tbody>'
+        + rows.map(r => '<tr>' + r.map(c => '<td>' + inline(c) + '</td>').join('') + '</tr>').join('')
+        + '</tbody></table></div>');
+      continue;
+    }
+
+    // 引用块
+    if (/^\s*>\s?/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s*>\s?/, ''));
+        i++;
+      }
+      out.push('<blockquote>' + buf.map(inline).join('<br>') + '</blockquote>');
+      continue;
+    }
+
+    // 无序 / 有序列表
+    const bullet = line.match(/^\s*[-*+]\s+/);
+    const numbered = line.match(/^\s*\d+[.)]\s+/);
+    if (bullet || numbered) {
+      const tag = bullet ? 'ul' : 'ol';
+      const items = [];
+      const re = bullet ? /^\s*[-*+]\s+/ : /^\s*\d+[.)]\s+/;
+      while (i < lines.length && re.test(lines[i])) {
+        items.push('<li>' + inline(lines[i].replace(re, '')) + '</li>');
+        i++;
+      }
+      out.push('<' + tag + '>' + items.join('') + '</' + tag + '>');
+      continue;
+    }
+
+    if (!line.trim()) { i++; continue; }
+
+    // 段落：吃到下一个块级起始为止；行内换行按 markdown 的硬换行处理
+    const buf = [line];
+    i++;
+    while (i < lines.length && !startsBlock(lines[i])
+           && !(lines[i].includes('|') && i + 1 < lines.length && isTableSep(lines[i + 1]))) {
+      buf.push(lines[i++]);
+    }
+    out.push('<p>' + buf.map(inline).join('<br>') + '</p>');
+  }
+  return out.join('');
 }
 
 // ====== Settings modal (⚙️) ======
@@ -2825,7 +3070,7 @@ function renderOverview(st) {
     keyEl.textContent = llm.has_api_key ? '已配置' : '未设置';
     keyEl.className = 'ov-value ' + (llm.has_api_key ? 'ov-ok' : 'ov-missing');
   }
-  setOv('ov_temp', llm.temperature != null ? String(llm.temperature) : '-');
+  setOv('ov_temp', llm.temperature != null ? String(llm.temperature) : '端点默认');
   setOv('ov_thinking', llm.enable_thinking ? '开启' : '关闭');
   const env = st.env || {};
   setOv('ov_python', env.python ? env.python + ' (' + (env.python_exe || '').split(/[\\/]/).pop() + ')' : '-');
@@ -3010,14 +3255,24 @@ function renderActiveProviderForm() {
 }
 
 function fillGlobalFields() {
-  document.getElementById('llm_temperature').value = settingsState.llm.temperature != null ? settingsState.llm.temperature : 0.0;
+  // temperature 未设置时留空，别填成 0.0 —— 0.0 是「完全贪心」，和「不指定、
+  // 用端点默认」是两回事，预填 0.0 会让人以为自己在用默认值。
+  const t = settingsState.llm.temperature;
+  document.getElementById('llm_temperature').value = (t != null && t !== '') ? t : '';
   document.getElementById('agent_iters').value = (settingsState.agent && settingsState.agent.max_iters) != null ? settingsState.agent.max_iters : 30;
 }
 
 async function saveSettings() {
   commitActiveProviderForm();
   settingsState.llm.provider = document.getElementById('curProvider').value;
-  settingsState.llm.temperature = parseFloat(document.getElementById('llm_temperature').value) || 0.0;
+  // 留空 → null（后端会把这个键从 config.yaml 删掉，即「用端点默认」）。
+  // 注意不能用 `parseFloat(v) || 0.0`：空串会变成 0.0，用户以为留空却设了贪心。
+  const rawTemp = document.getElementById('llm_temperature').value.trim();
+  settingsState.llm.temperature = rawTemp === '' ? null : parseFloat(rawTemp);
+  if (settingsState.llm.temperature != null && Number.isNaN(settingsState.llm.temperature)) {
+    showToast('Temperature 必须是 0~2 的数字，或留空用模型默认', 'error');
+    return;
+  }
   if (!settingsState.agent) settingsState.agent = {};
   settingsState.agent.max_iters = parseInt(document.getElementById('agent_iters').value, 10) || 30;
   const payload = {

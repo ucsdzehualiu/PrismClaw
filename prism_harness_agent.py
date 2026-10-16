@@ -355,7 +355,14 @@ async def agent_runner(sess: Session, cfg: dict, workspace_dir: str):
         request, status = await sess.get_request()
         if status == SessionStatus.INACTIVE:
             console("[session-end]", sess.session_id)
-            viz.commit()
+            # 上下文字迹落盘失败不该拖垮收尾：早先这里裸调，一旦 commit 抛异常
+            # （会话目录被删→FileNotFoundError），sess.release() 就被跳过，
+            # 会话永远停在 ACTIVE、[session-end] 只打了一半，agent_runner 任务整个
+            # 死在「Task exception was never retrieved」里再也起不来。
+            try:
+                viz.commit()
+            except Exception as e:
+                console("[viz-error]", e)
             await sess.release()
             break
 
@@ -521,7 +528,11 @@ async def _run_chat_path(request, sess, cfg, workspace_dir, agent, viz, ctx_sink
         if msg is None:
             break
 
-    viz.commit()
+    # 落盘失败只该丢一份上下文字迹，不该把这一轮对话判死。
+    try:
+        viz.commit()
+    except Exception as e:
+        console("[viz-error]", e)
 
 
 async def _stream_one_reply(agent, inputs, q, sess, request, max_iters, current_phase, viz=None, renderer=None):
@@ -758,11 +769,6 @@ async def _run_team_path(request, sess, cfg, workspace_dir):
         run_id = "run_" + time.strftime("%Y%m%d_%H%M%S")
         run_dir = os.path.join(log_dir, sess.session_id, "teams", run_id)
 
-        async def emit_team(ev):
-            if request.canceled:
-                return
-            await response_q.put({"type": "team", **ev})
-
         is_multi_stage = team_spec.get("type") in ("roundtable", "pipeline")
         team_timeout = float(cfg.get("agent", {}).get("roundtable_timeout", 1800 if is_multi_stage else 600))
         member_timeout = 600.0 if is_multi_stage else 300.0
@@ -771,15 +777,68 @@ async def _run_team_path(request, sess, cfg, workspace_dir):
         async def run_team_and_emit():
             await response_q.put({"type": "status", "phase": "thinking", "step": 0,
                                   "detail": f"🎭 启动团队「{team_name}」并行编排…"})
-            report, _results = await team_mod.run_team_stream(
+            report, results = await team_mod.run_team_stream(
                 team_spec, team_task, emit_team, cfg, workspace_dir,
                 run_dir=run_dir, member_timeout=member_timeout, max_concurrent=max_concurrent,
             )
             if team_mod.is_interrupted_output(report):
                 report = ("⚠️ 本次编排被中断，未能产出最终报告。建议检查模型端点稳定性后重跑；"
                           "各成员中间产出已落盘在 session_logs 对应目录下。")
+            else:
+                # 有成员跑满迭代上限时，把名单附在报告里：面板那一行的标注，
+                # 读报告的人看不到。
+                report = (report or "") + team_mod.truncation_warning(results)
             await response_q.put({"msg_id": "team-report", "last": True,
                                   "contents": [{"type": "text", "content": report}]})
+
+        # 心跳：团队成员各自跑一整轮 ReAct（含联网/命令），中途 SSE 可能安静好几分钟。
+        # 没有心跳时状态栏一直停在「启动团队…」，看起来就像卡死了（2026-10-15 报障：
+        # 「19 人的一直不动」）。每 10s 报一次进度，慢但在动，用户看得出来。
+        hb_stop = asyncio.Event()
+        # running/queued 分开记：成员受 team_max_concurrent 限流，19 个里同时只有 4 个
+        # 真在跑。只报「已完成 N」时，N 长时间不动看着还是像卡死；报出「运行中 4，排队 15」
+        # 才说明它确实在按并发上限推进。
+        progress = {"done": 0, "failed": 0, "running": 0, "queued": 0}
+
+        async def emit_team(ev):
+            phase = ev.get("phase")
+            if phase == "member_queued":
+                progress["queued"] += 1
+            elif phase == "member_start":
+                # queued → running；风控/决策阶段没有 queued 事件，夹到 0 免得变负
+                progress["queued"] = max(0, progress["queued"] - 1)
+                progress["running"] += 1
+            elif phase == "member_done":
+                progress["running"] = max(0, progress["running"] - 1)
+                progress["done"] += 1
+            elif phase == "member_error":
+                progress["running"] = max(0, progress["running"] - 1)
+                progress["failed"] += 1
+            if request.canceled:
+                return
+            await response_q.put({"type": "team", **ev})
+
+        async def team_heartbeat():
+            tick = 0
+            while not hb_stop.is_set():
+                try:
+                    await asyncio.wait_for(hb_stop.wait(), timeout=10)
+                except asyncio.TimeoutError:
+                    pass
+                if hb_stop.is_set():
+                    break
+                tick += 1
+                parts = [f"已完成 {progress['done']}", f"失败 {progress['failed']}"]
+                if progress["running"]:
+                    parts.append(f"运行中 {progress['running']}")
+                if progress["queued"]:
+                    parts.append(f"排队 {progress['queued']}")
+                await response_q.put({
+                    "type": "status", "phase": "heartbeat",
+                    "detail": (f"🎭 {team_name} 运行中（{tick * 10}s）— " + "，".join(parts)),
+                })
+
+        hb_task = asyncio.create_task(team_heartbeat())
 
         team_run_task = asyncio.create_task(run_team_and_emit())
         request.stream_task = team_run_task
@@ -791,13 +850,25 @@ async def _run_team_path(request, sess, cfg, workspace_dir):
                 await response_q.put({"type": "status", "phase": "done", "detail": "完成"})
         except asyncio.TimeoutError:
             team_run_task.cancel()
+            # 超时同样会丢下一堆没跑完的成员，面板要收尾，不然一直挂着「分析中」
+            await response_q.put({"type": "team", "phase": "canceled"})
             await response_q.put({"type": "status", "phase": "error",
                                   "detail": f"团队运行超时（>{team_timeout:.0f}s），已终止。"})
             await response_q.put({"error": "team timeout", "last": True, "contents": []})
         except asyncio.CancelledError:
             if not request.canceled:
                 raise
+            # 服务端侧的取消（会话释放、被别的请求顶掉等）：通知还连着的客户端收尾面板。
+            # 用户点「停止」那条路前端会先 abort SSE、收不到这条，它另行本地收尾；
+            # 两条路都覆盖，面板才不会永远停在「分析中」。
+            await response_q.put({"type": "team", "phase": "canceled"})
             await response_q.put({"cancel": True, "last": True, "contents": []})
+        finally:
+            hb_stop.set()
+            try:
+                await asyncio.wait_for(hb_task, timeout=2)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                hb_task.cancel()
     except asyncio.CancelledError:
         raise
     except Exception as e:

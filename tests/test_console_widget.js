@@ -49,6 +49,7 @@ eval(widgetSrc + '\n' +
   ';globalThis.H = handleTeamEvent;' +
   'globalThis.W = () => teamWidgetEl;' +
   'globalThis.SET_COLLAPSED = v => { teamCollapsed = v; };' +
+  'globalThis.CANCEL = () => cancelTeamWidget();' +
   'globalThis.RERENDER = () => renderTeamWidget("asst-1");');
 
 // ---- 断言小工具 ----
@@ -111,6 +112,74 @@ emit({ phase: 'start', stage: 'parallel' });
 emit({ phase: 'member_start', member: 'a"b<c>', color: '#222' });
 const quoted = W().innerHTML;
 check('成员名引号被转义（不破坏属性）', quoted.includes('&quot;') && !quoted.includes('data-member="a"b'));
+
+// ---- 场景五：并发排队 ≠ 分析中 ----
+// 19 人圆桌受 team_max_concurrent 限制，同时只有 4 个真在跑。服务端先发
+// member_queued、抢到名额后才发 member_start；面板必须把两种状态分开渲染，
+// 否则 19 行全是「⏳ 分析中…」，看着就像卡死（2026-10-16 报障）。
+emit({ phase: 'start', stage: 'roundtable', team: '投资大师专家团' });
+emit({ phase: 'stage_start', stage: 'analysis', label: '各位大师并行分析中…', index: 0, total: 3 });
+['奥马哈先知', '查理·芒格', '麦哲伦舵手', '大空头', '黑天鹅之父', '木头姐'].forEach(m =>
+  emit({ phase: 'member_queued', stage: 'analysis', member: m, color: '#333' }));
+emit({ phase: 'member_start', stage: 'analysis', member: '奥马哈先知', color: '#333' });
+emit({ phase: 'member_start', stage: 'analysis', member: '查理·芒格', color: '#333' });
+SET_COLLAPSED(false);
+RERENDER();
+const qq = W().innerHTML;
+check('排队成员渲染为 🕒 排队中', (qq.match(/🕒 排队中/g) || []).length === 4);
+check('排队行带 queued 样式（整行压暗）', (qq.match(/tp-row queued/g) || []).length === 4);
+check('抢到名额的成员仍显示 ⏳ 分析中', (qq.match(/⏳ 分析中…/g) || []).length >= 2);
+SET_COLLAPSED(true);
+RERENDER();
+const qc = W().innerHTML;
+check('收起摘要分列「运行中」与「排队中」', qc.includes('运行中') && qc.includes('排队中'));
+SET_COLLAPSED(false);
+RERENDER();
+// 类型名不能把阶段数写死：轻量版圆桌是「分析→风控→决策」三段，
+// 旧文案写死「两阶段圆桌」，于是标题成了「两阶段圆桌 · 阶段 3/3」。
+check('圆桌标题按实际阶段数显示', qq.includes('圆桌 · 3 阶段'), qq.slice(0, 90));
+
+// ---- 场景六：点「停止」后本地收尾团队面板 ----
+// stopGeneration 会先 abort 掉 SSE，服务端补发的取消事件收不到；面板必须自己
+// 把运行/排队中的成员落定，否则它们永远停在「⏳ 分析中…」，看着像按钮没生效。
+emit({ phase: 'start', stage: 'roundtable', team: '投资大师专家团' });
+emit({ phase: 'stage_start', stage: 'analysis', label: '各位大师并行分析中…', index: 0, total: 3 });
+['甲', '乙', '丙'].forEach(m => emit({ phase: 'member_queued', stage: 'analysis', member: m, color: '#444' }));
+emit({ phase: 'member_start', stage: 'analysis', member: '甲', color: '#444' });
+SET_COLLAPSED(false);
+RERENDER();
+CANCEL();
+const ca = W().innerHTML;
+check('停止后运行/排队中的成员落定为 ⛔ 已取消', (ca.match(/⛔ 已取消/g) || []).length === 3,
+  String((ca.match(/⛔ 已取消/g) || []).length));
+check('停止后不再有成员显示「分析中」', !ca.includes('⏳ 分析中…'));
+check('停止后阶段 chip 不再标为进行中', !/tp-step run/.test(ca));
+
+// 服务端侧取消（会话释放 / 超时）：事件仍能到达时要走同一条收尾路径
+emit({ phase: 'start', stage: 'roundtable', team: 'T' });
+emit({ phase: 'stage_start', stage: 'analysis', label: '分析', index: 0, total: 2 });
+emit({ phase: 'member_queued', stage: 'analysis', member: '甲', color: '#444' });
+emit({ phase: 'member_start', stage: 'analysis', member: '甲', color: '#444' });
+emit({ phase: 'canceled' });
+const sc = W().innerHTML;
+check('服务端 canceled 事件同样收尾成员', (sc.match(/⛔ 已取消/g) || []).length === 1,
+  String((sc.match(/⛔ 已取消/g) || []).length));
+
+// ---- 场景七：跑满迭代上限的成员要看得见 ----
+// 服务端从框架的 finished_reason 认出 exceed_max_iters 时会在 member_done 上带
+// note。这类成员正文是真的但可能被截断，必须标出来，不能混在「✅ 完成」里。
+emit({ phase: 'start', stage: 'pipeline', team: 'T' });
+emit({ phase: 'stage_start', stage: 's1', label: '扫描', index: 0, total: 1 });
+emit({ phase: 'member_start', stage: 's1', member: '甲', color: '#555' });
+emit({ phase: 'member_done', stage: 's1', member: '甲', bytes: 1234, summary: '甲摘要',
+       note: '⚠ 跑满迭代上限，以上为强制收尾产出，可能不完整', finished_reason: 'exceeded' });
+emit({ phase: 'member_start', stage: 's1', member: '乙', color: '#555' });
+emit({ phase: 'member_done', stage: 's1', member: '乙', bytes: 100, summary: '乙摘要' });
+SET_COLLAPSED(false);
+RERENDER();
+const nt = W().innerHTML;
+check('跑满上限的成员在行内标注出来', nt.includes('跑满迭代上限'));
+check('没跑满的成员不带该标注', nt.includes('✅ 100 B') && !nt.includes('✅ 100 B · '));
 
 // ---- 汇总 ----
 let failed = 0;

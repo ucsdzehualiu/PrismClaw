@@ -37,6 +37,33 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+def optional_temperature(value):
+    """把配置里的 temperature 规整成「None = 不指定」或一个合法浮点数。
+
+    未填（None / 空串）返回 None。AgentScope 的 Parameters.temperature 是
+    `float | None`，模型层只在非 None 时才把它塞进请求（_openai_chat/_model.py:
+    `if self.parameters.temperature is not None: kwargs["temperature"] = ...`），
+    所以 None 就等于「不下发这个参数，让端点用它自己的默认值」。
+
+    早先这里写的是 `llm_cfg.get("temperature", 0.0)` —— 配了 1.4 就用 1.4，
+    没配就**静默变成 0.0**，而不是端点默认值。0.0 是「完全贪心」，对投研这类
+    需要发散的观点生成并不合适，用户却不会意识到自己「没设置」竟然选了它。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        value = value.strip()
+        if not value:
+            return None
+    try:
+        temp = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"temperature 必须是数字或留空，收到：{value!r}")
+    if not 0.0 <= temp <= 2.0:
+        raise ValueError(f"temperature 必须在 0~2 之间，收到：{temp}")
+    return temp
+
+
 def build_model(cfg: dict, stream: bool = True):
     """构建 AgentScope 2.0 的 OpenAIChatModel 实例。
 
@@ -47,6 +74,9 @@ def build_model(cfg: dict, stream: bool = True):
 
     1.0 的 `client_kwargs={"base_url": ...}` / `generate_kwargs={...}` 写法在 2.0
     已不存在。token 计数也内置在 model.count_tokens，不再需要单独的 token counter。
+
+    temperature 可留空：留空 = 不下发该参数，由模型端点决定采样温度（见
+    optional_temperature）。
     """
     _ensure_ssl_env()
     provider_name = cfg["llm"]["provider"]
@@ -66,7 +96,7 @@ def build_model(cfg: dict, stream: bool = True):
     )
 
     parameters = OpenAIChatModel.Parameters(
-        temperature=llm_cfg.get("temperature", 0.0),
+        temperature=optional_temperature(llm_cfg.get("temperature")),
         parallel_tool_calls=llm_cfg.get(
             "parallel_tool_calls",
             cfg.get("agent", {}).get("parallel_tool_calls", True),

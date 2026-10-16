@@ -63,6 +63,7 @@ python server.py
                                 │   ├─ on_system_prompt 中间件（动态注入 persona/技能）
                                 │   └─ 权限引擎（受保护工具注册期打 ASK → 停泊 / 续跑）
                                 ├─ build_toolkit() 工具包 (tools.py)
+                                │   └─ 受保护工具：主代理 ASK（停泊/续跑）；执行单元 ALLOW
                                 ├─ run_team_stream() 团队编排 (team.py)
                                 │   ├─ 并行团队：成员并行分析 → lead 汇总
                                 │   ├─ 圆桌 roundtable：分析 → 风控 → 决策
@@ -84,13 +85,14 @@ python server.py
 
 - **语义交给模型，确定性交给代码。** 意图理解靠 System Prompt + 技能描述（`SKILL.md` 的 `description` 写成触发条件）让模型自路由；而权限、编排、打断这些「必须正确」的事一律用代码兜底，不过模型。所以没有独立的意图分类器——那会引入一个新的失败点。
 - **HITL 是声明式的，不是拦截式的。** 受保护工具在**注册期**打 `PermissionDecision(ASK)`，权限是数据；停泊/续跑用框架的一等公民事件协议（`RequireUserConfirmEvent` / `UserConfirmResultEvent`），不覆写私有方法、不伪造 tool_result。
-- **编排要确定性、要可测。** 12 套外部专家团是固定 SOP，所以自研 `team.py` 按 `stages` 确定性驱动，而不是用框架里「leader 临场决定派谁」的 `TeamPipeline`——代价是少了临场弹性，换来的是**能脱开 LLM 做 44 项回归测试**。
+- **编排要确定性、要可测。** 12 套外部专家团是固定 SOP，所以自研 `team.py` 按 `stages` 确定性驱动，而不是用框架里「leader 临场决定派谁」的 `TeamPipeline`——代价是少了临场弹性，换来的是**能脱开 LLM 做 150 项回归测试**。
 
 ## 文件说明
 
 ### 启动与配置
 - `launch.bat` — Windows 启动器，清理上一轮残留后再启动，端口就绪后自动开浏览器。
 - `cleanup.py` — 清理脚本，杀掉 8765 端口旧进程 + 删 `__pycache__`。
+- `server.out.log` — server 进程的 stdout/stderr（启动时自动改道到这里，见「抗卡死」）。
 - `config.example.yaml` — 配置文件模板，复制为 `config.yaml` 后填入你的 API Key。
 - `config.yaml` — 运行配置（**不提交到 Git**，含 API Key）。
 - `conf.py` — 功能开关；另含 `GUARD_TOOLS` / `GUARD_TIMEOUT`（现仅供设置页展示，实际权限在 `tools.py` **注册期**声明）。
@@ -99,27 +101,34 @@ python server.py
 
 ### 核心模块
 - `prism_harness_agent.py` — 2.0 `Agent` 的构造与每会话后台运行循环 `agent_runner()`：把 `reply_stream` 事件流映射回前端既有 SSE 信封，负责心跳、工具调用按 id 归并、magic 命令（`/approve` `/reject` `/team`）与 **HITL 停泊 / 续跑**（`_stream_one_reply` / `_build_resume_inputs`）。
-- `tools.py` — 工具系统：基于 AgentScope `Toolkit` 注册全部内置工具（命令执行 / 网页抓取 / 联网搜索 / 技能管理 / 文件下载），受保护工具在**注册期**打 `PermissionDecision(behavior=ASK)`（只读工具 `is_read_only=True` 由引擎自动放行）；并生成系统提示词。
+- `tools.py` — 工具系统：基于 AgentScope `Toolkit` 注册全部内置工具（命令执行 / 网页抓取 / 联网搜索 / 技能管理 / 文件下载）。受保护工具（写文件 / 插文本 / 跑命令 / 下载）在**注册期**打 `PermissionDecision`：**主代理**（`interactive=True`，有前端可确认）打 `ASK`；**执行单元**（`interactive=False`：团队成员 / lead / 风控 / 决策 / 子代理）打 `ALLOW`——它们没有确认通道，打 ASK 会让代理一调工具就停泊（只读工具 `is_read_only=True` 由引擎自动放行）。另负责生成系统提示词。
 - `context_viz.py` — 上下文可视化引擎（`ContextViz`），每轮生成结构化上下文快照供前端透明化展示与落盘。
 - `session.py` — 会话管理（`Session` / `SessionManager`），请求队列、HITL 停泊队列、超时回收。
   > 1.0 的 `prism_harness_guard.py`（覆写 `_reasoning` / `_acting` + 假 tool_result）已随 2.0 迁移**删除**，HITL 改由框架权限引擎承担。
 - `server.py` — FastAPI 服务，提供 Web 界面与 SSE 流式对话接口。
 - `index.html` — Web 界面（三栏：对话 / 上下文光谱 / 工具时间线）。
-- `team.py` — 团队编排（`run_team_stream`）：并行 / 圆桌 / 多阶段 pipeline 三种类型，含打断重试、上下文累积与增量落盘。
+- `team.py` — 团队编排（`run_team_stream`）：并行 / 圆桌 / 多阶段 pipeline 三种类型，含打断重试、上下文累积与增量落盘。成员的产出若是框架预设文案（被打断 / 权限停泊）会判为**失败**而不是有效信号，绝不喂给下游的风控 / 决策 / 主理人。
 - `port_experts.py` — 移植工具：把 `专家团/` 下外部专家团队生成为 `teams/` + `skills/`（见 [`PORTING.md`](PORTING.md)）。
 - `tests/test_pipeline.py` — 团队编排的确定性回归测试（不调 LLM，验证阶段顺序/并行/上下文传递/容错/落盘）。
 - `tests/test_console_widget.js` — 团队面板渲染的无头回归测试（Node，抽 index.html 的代码段 + DOM 桩，验证面板 HTML）。
+- `tests/test_markdown.js` — markdown 渲染器的无头回归测试（Node，表格 / 标题 / 引用 / 分隔线 / 代码围栏 / 转义）。
+- `tests/test_report_card.js` — 报告卡片的无头回归测试（Node，产出标记识别、正文清理、标题取名）。
+- `tests/test_stage_report.js` — 阶段产出卡片（圆桌的风控评估）的无头回归测试（Node，含事件路由）。
 - `tests/test_console_browser.js` — 真实浏览器冒烟（CDP 驱动本机 Chrome/Edge，抓 console 报错并在真 DOM 里验证面板）。加 `PH_LIVE=1` 会真的点「🎭 团队」跑一次（会调模型）。
 
 ```bash
 python tests/test_pipeline.py                     # 编排逻辑（免费）
 node tests/test_console_widget.js                 # 面板渲染（免费）
+node tests/test_markdown.js                       # markdown 渲染（免费）
+node tests/test_report_card.js                    # 报告卡片（免费）
+node tests/test_stage_report.js                   # 阶段产出卡片（免费）
 node tests/test_console_browser.js                # 真实浏览器（免费，需本机有 Chrome/Edge）
 PH_LIVE=1 node tests/test_console_browser.js      # 真实浏览器 + 真跑一次团队（调模型）
 
 python tests/smoke2.py                            # 导入 / 工具包 / Agent 构造 / 权限上下文（免费）
 python tests/smoke_live.py                        # 真实 LLM 单轮 HITL 确认→执行（需模型）
 python tests/smoke_team_live.py                   # 真实 LLM 团队端到端（需模型）
+python tests/smoke_team_tools_live.py             # 真实 LLM：成员真的能跑工具、不因权限停泊（需模型）
 python tests/smoke_server.py                      # FastAPI + SSE /approve 续跑（需 server 在跑）
 ```
 
@@ -136,6 +145,7 @@ python tests/smoke_server.py                      # FastAPI + SSE /approve 续�
 3. 你 `/approve` → 走**新的一轮** `/chat`，`_build_resume_inputs` 构造 `UserConfirmResultEvent` 续跑；批准则真正执行、拒绝则注入 DENIED 结果。
 4. `/approve_all` 置 `auto_approve`，本轮内自动放行；批准可带 `suggested_rules` 实现「以后都允许」。
 5. 停泊**不占协程**（不是挂起等待），所以不会死锁；`GUARD_TIMEOUT` 仅作兜底。
+6. **ASK 只发给主代理。** 团队成员 / lead / 风控 / 决策 / 子代理走 `build_toolkit(interactive=False)`，那里受保护工具打 `ALLOW`。它们没有可确认的用户——一旦打成 ASK，代理会在 `_next_action` 停泊并把这句当回复返回：`I'm waiting for your permission or the external execution to finish.`（status 仍是 ok）。2026-10-15 的「19 位大师全部返回同一句英文」就是这个原因；`team.py` 现在也把这句话判为失败而不是成员信号。
 
 > 结构化提问 `ask_user_question`（= 2.0 内置 `AskUser` 改名）走另一条通道：`RequireExternalExecutionEvent` → 前端弹选择题 → `/answer` 续跑。
 
@@ -145,10 +155,16 @@ python tests/smoke_server.py                      # FastAPI + SSE /approve 续�
 - 单轮 ReAct 迭代硬上限（`max_iters`，config.yaml 默认 30），到顶强制停。
 - 系统提示中明确“拿到结果就停、不重复调用”等铁规则。
 
+### 抗卡死（2026-10-16 补）
+- **server 输出改道文件。** `python server.py` 启动时会把本进程 fd 1/2 重定向到 `server.out.log`。原因：Windows 控制台一旦进入「快速编辑」选中态，向它 `write` 就会**阻塞**；而 `console()` 与第三方库的 `logging` 都是在**事件循环线程**上直接写 stdout/stderr 的，于是事件循环永久卡死在 `write()` 里——TCP 能连、拿不到任何 HTTP 响应，界面表现就是「一直不动」。改道文件后控制台状态再也拖不垮服务。
+- **技能目录先过滤再交给框架。** `build_toolkit` 只把带 `name`+`description` frontmatter 的合法技能交给 AgentScope，并按**声明的技能名**去重。否则 skills/ 里混着的任务笔记、同名技能会让加载器每次 build 都刷 warning（19 人团队 = 20+ 次），既吵又正是上面那个卡死的触发源。
+- **瞬时故障退避重试。** 成员撞上端点限流（如 ModelArts `429 ... rate limit is 4 per second`）会退避 2s/4s/8s（带抖动）重建代理重试，而不是直接把整份分析判死；非瞬时异常（配置错等）立即抛出，不浪费重试。注意：成员自己的 `member_timeout` 预算耗尽**不**重试——那会变成静默再等 10 分钟，正是「看起来卡住」的观感。
+- **团队路径也有心跳。** 每 10s 推一条 `phase: heartbeat`，带上「已完成 N，失败 M」，成员跑几分钟也不会看起来像死了。
+
 ### 流式处理
 - 2.0 用类型化事件流（`ReplyStartEvent` / `TextBlockDeltaEvent` / `ToolCallEndEvent` / `ToolResultEndEvent`…），由 `prism_harness_agent.py` 映射回前端既有 SSE 信封。
 - 工具调用按 `tool_call_id` 归并：增量 delta 累积，到 `ToolCallEndEvent` 才 emit 一次。
-- 每 7 秒推一条心跳，绝不静默。
+- 每 7 秒推一条心跳，绝不静默（团队编排路径每 10s 一条，带进度计数）。
 
 ### 上下文压缩（框架自带）
 - 真正的容量上限是 **`llm.context_size`（模型上下文窗口）**。当 token 数超过 `context_size × context.compress_threshold`（默认 0.8）时，AgentScope 2.0 会在**每次推理前**自动把较早的历史压成一份结构化摘要（写进 `AgentState.summary`），只保留最近一段原文；不依赖模型"自觉"。

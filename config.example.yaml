@@ -4,6 +4,8 @@
 
 llm:
   provider: "dsv4-local"
+  # temperature 可留空（整行删掉或留空）= 不向模型下发该参数，由模型端点决定采样温度。
+  # 要固定值就写 0~2 的数字（0 = 完全贪心，值越大越发散）。
   temperature: 0.0
   enable_thinking: false
   # 模型上下文窗口（tokens）。这才是真正的容量上限——框架在

@@ -1037,6 +1037,42 @@ async def run_team_tool(
 
 # ---- 工具包构建（AgentScope 2.0） ----
 
+# SKILL.md 头部的 YAML frontmatter（`---` 包起来的一段）
+_SKILL_FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*(\n|$)", re.S)
+
+
+def _declared_skill_name(skill_dir: str) -> str | None:
+    """返回 SKILL.md 里声明的技能名；不是「合法技能」就返回 None。
+
+    AgentScope 的技能加载器只认带 `name` + `description` frontmatter 的 SKILL.md，
+    其余一律跳过并打 warning。这里先挡掉，理由有两条：
+
+    1. 那些 warning 是在**事件循环线程**上写日志的，Windows 控制台一旦进入选中态
+       就会阻塞 write，把整个服务卡死（见 server._capture_server_output）。
+    2. skills/ 目录里常混进误放的任务笔记（例如把一段 PPT 提示词存成了 SKILL.md），
+       每次 build_toolkit（19 人团队 = 20+ 次）都刷一遍警告，纯噪音。
+
+    这里只做存在性判断，真正的 YAML 解析仍交给框架（不重复实现一遍规则）。
+    """
+    path = os.path.join(skill_dir, "SKILL.md")
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read(8192)
+    except OSError:
+        return None
+    m = _SKILL_FRONTMATTER_RE.match(text)
+    if not m:
+        return None
+    fm = m.group(1)
+
+    def _value(key: str) -> str:
+        hit = re.search(rf"^{key}\s*:\s*(.*)$", fm, re.M)
+        return hit.group(1).strip().strip("'\"").strip() if hit else ""
+
+    name, description = _value("name"), _value("description")
+    return name if name and description else None
+
+
 class PrismAskUser(AskUser):
     """2.0 内置 AskUser 的改名版：沿用 PrismHarness 既有的 `ask_user_question`
     工具名，前端与 system prompt 无需改动。外部工具，走 RequireExternalExecutionEvent。
@@ -1056,11 +1092,23 @@ async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = Tr
                 2) 允许成员再拉起团队/子代理会造成嵌套编排，成本失控。
 
     受确认保护的工具不再靠 GUARD 名单拦截，而是在注册时打
-    `PermissionDecision(behavior=ASK)`——2.0 权限引擎会在执行前弹出确认。
+    `PermissionDecision`——2.0 权限引擎会在执行前决定放行还是问用户。
     只读工具标 `is_read_only=True`，引擎自动放行、不打扰用户。
+
+    受保护工具（写文件/插入/跑命令/下载）的 behavior 随 `interactive` 变：
+    主代理打 ASK（有 UI 可以确认）；执行单元打 ALLOW。执行单元**没有**面向
+    用户的确认通道，打 ASK 会让权限引擎把这次调用挂起（awaiting），代理在
+    `_next_action` 里停泊、结束本轮，并把「I'm waiting for your permission or
+    the external execution to finish.」当成正常回复交出去（status 还是 ok）——
+    于是整个团队所有成员"成功"返回同一句占位文案，报告里一条信号都没有。
     """
     # ── 技能目录：workspace/skills 优先，仓库根 skills 兜底（同名 workspace 覆盖）──
     # 由 enable_skill_auto_discover 控制；关掉则不自动扫描（技能不会挂进 System Prompt）。
+    # 只挑「合法技能」（SKILL.md 有 name+description 的 YAML frontmatter）：缺 frontmatter
+    # 或字段不全的目录交给 AgentScope 的 loader 只会换回一条 warning，而那条 warning 是在
+    # 事件循环线程上写日志的，控制台一被选中就把服务卡死（详见 server._capture_server_output）。
+    # 去重按**声明的技能名**而不是目录名——workspace/skills/vision 与 agent-vision-skill
+    # 都叫 vision，按目录名去重会漏，框架再报一次 "Duplicate skill name"。
     skill_dirs: list[str] = []
     if FLAGS.get("enable_skill_auto_discover", True):
         seen: set[str] = set()
@@ -1069,23 +1117,31 @@ async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = Tr
                 continue
             for skill_name in sorted(os.listdir(base)):
                 d = os.path.join(base, skill_name)
-                if (
-                    os.path.isdir(d)
-                    and os.path.isfile(os.path.join(d, "SKILL.md"))
-                    and skill_name not in seen
-                ):
-                    seen.add(skill_name)
-                    skill_dirs.append(d)
+                if not (os.path.isdir(d) and os.path.isfile(os.path.join(d, "SKILL.md"))):
+                    continue
+                declared = _declared_skill_name(d)
+                if declared is None or declared in seen:
+                    continue
+                seen.add(declared)
+                skill_dirs.append(d)
 
     tools: list[ToolBase] = []
 
-    def _add(func, *, name: str = None, read_only: bool = False, ask: bool = False, allow: bool = False):
+    def _add(func, *, name: str = None, read_only: bool = False, guard: bool = False, allow: bool = False):
+        """guard=True：受确认保护的工具。
+
+        主代理（interactive=True）→ ASK，权限引擎弹卡片等用户确认。
+        执行单元（interactive=False）→ ALLOW：它没有可确认的用户，ASK 只会让
+        代理永远停泊（见 build_toolkit 的 interactive 说明）。
+        """
         kw = {"name": name or func.__name__, "is_read_only": read_only}
-        if ask:
+        if guard:
             kw["is_read_only"] = False
             kw["permission"] = PermissionDecision(
-                behavior=PermissionBehavior.ASK,
-                message=f"工具 {kw['name']} 需要用户确认后才能执行。",
+                behavior=(PermissionBehavior.ASK if interactive
+                          else PermissionBehavior.ALLOW),
+                message=(f"工具 {kw['name']} 需要用户确认后才能执行。" if interactive
+                         else f"工具 {kw['name']} 无需确认（自主执行单元）。"),
             )
         elif allow:
             kw["permission"] = PermissionDecision(
@@ -1098,13 +1154,13 @@ async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = Tr
     if FLAGS.get("enable_view_text_file", True):
         _add(view_text_file, read_only=True)
     if FLAGS.get("enable_write_text_file", True):
-        _add(write_text_file, ask=True)
+        _add(write_text_file, guard=True)
     if FLAGS.get("enable_insert_text_file", True):
-        _add(insert_text_file, ask=True)
+        _add(insert_text_file, guard=True)
 
     # ── Shell（受确认保护）──
     if FLAGS.get("enable_execute_shell_command", True):
-        _add(run_shell, ask=True)
+        _add(run_shell, guard=True)
 
     # ── Web 搜索（必应中国，国内可用）+ 网页抓取（只读）──
     if FLAGS.get("enable_websearch", True):
@@ -1139,7 +1195,7 @@ async def build_toolkit(workspace_dir: str = "workspace", interactive: bool = Tr
             """
             return await download_file(url, save_name, workspace_dir=workspace_dir)
 
-        _add(download_file_tool, name="download_file", ask=True)
+        _add(download_file_tool, name="download_file", guard=True)
 
     # ── 结构化提问（仅主代理；2.0 内置 AskUser，走外部执行通道弹卡片）──
     if interactive:
