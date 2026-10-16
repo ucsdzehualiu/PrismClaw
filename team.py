@@ -496,8 +496,10 @@ async def _settle_member(emit, member: dict, outcome: AgentOutcome, stage, extra
         }
         if stage:
             ev["stage"] = stage
-            # 摘要供前端"成员中间产物"展示（截断，避免灌爆小组件/主对话）
-            ev["summary"] = outcome.text[:900] + ("…" if len(outcome.text) > 900 else "")
+        # 摘要供前端"成员中间产物"展示（截断，避免灌爆小组件/主对话）。
+        # 三种编排一律带：扁平团队原先漏了，于是只有它的成员行展不开，
+        # 与管线 / 圆桌不一致。
+        ev["summary"] = outcome.text[:900] + ("…" if len(outcome.text) > 900 else "")
         await emit(ev)
         return {**result, "output": outcome.text, "status": "ok", "note": note}
 
@@ -894,6 +896,29 @@ async def _run_design_agent(prompt: str, name: str, task: str, input_text: str, 
     return await _run_agent_once(agent, f"任务：{task}\n\n{input_text}", timeout=timeout)
 
 
+# 圆桌三个阶段（分析 / 风险评估 / 最终决策）的默认显示文案。
+# 措辞刻意保持**中性**：圆桌编排是通用的，把「各位大师」「投资组合经理」
+# 「BUY/SELL/HOLD」写死在这里，任何非投资域的圆桌都会显示错误的阶段标题
+# ——和之前写死「19 位大师」是同一类毛病。
+# 团队 spec 可用 stage_labels 覆盖，例如：
+#   "stage_labels": {"analysis": "各位大师并行分析中…", "risk": "风险管理师评估风险…",
+#                    "risk_report": "风险管理师评估", "decision": "…"}
+_ROUNDTABLE_STAGE_LABELS = {
+    "analysis": "成员并行分析中…",
+    "risk": "风险评估中…",
+    "risk_report": "风险评估",
+    "decision": "最终决策中…",
+}
+
+
+def _roundtable_label(team: dict, key: str) -> str:
+    """圆桌阶段文案：优先用 spec 里的 stage_labels，否则取中性默认值。"""
+    labels = team.get("stage_labels")
+    if isinstance(labels, dict) and labels.get(key):
+        return str(labels[key])
+    return _ROUNDTABLE_STAGE_LABELS.get(key, key)
+
+
 async def run_roundtable_stream(
     team: dict,
     task: str,
@@ -959,7 +984,8 @@ async def run_roundtable_stream(
         running.pop(mid, None)
         return res
 
-    await _emit({"phase": "stage_start", "stage": "analysis", "label": "各位大师并行分析中…",
+    await _emit({"phase": "stage_start", "stage": "analysis",
+                 "label": _roundtable_label(team, "analysis"),
                  "index": 0, "total": _n_stages})
     try:
         results = await asyncio.gather(*[run_member(m) for m in members])
@@ -987,12 +1013,13 @@ async def run_roundtable_stream(
     risk_report = ""
     risk_prompt = team.get("risk_prompt") or ""
     if risk_prompt:
-        await _emit({"phase": "stage_start", "stage": "risk", "label": "风险管理师评估风险…",
+        await _emit({"phase": "stage_start", "stage": "risk",
+                     "label": _roundtable_label(team, "risk"),
                      "index": 1, "total": _n_stages})
         try:
             risk_outcome, _attempts = await _run_design_agent_checked(
                 risk_prompt, "risk-manager", task,
-                _stage_prompt(task, results, f"以下是 {len(results)} 位大师/分析师的独立信号汇总："),
+                _stage_prompt(task, results, f"以下是 {len(results)} 位成员的分析信号汇总："),
                 cfg, workspace_dir, member_timeout,
                 retries=int(cfg.get("agent", {}).get("team_retries", 2)),
             )
@@ -1002,25 +1029,26 @@ async def run_roundtable_stream(
                 # 不塞进最终报告：那会把它和决策混成一份，读者分不清哪段是约束、
                 # 哪段是结论。（成员产出另有团队面板承载，这里只有单代理的阶段。）
                 await _emit({"phase": "stage_report", "stage": "risk",
-                             "label": "风险管理师评估", "text": risk_report})
+                             "label": _roundtable_label(team, "risk_report"), "text": risk_report})
             else:
-                risk_report = "（风险管理师未能产出评估：%s）" % _stall_error_text(risk_outcome)
+                risk_report = "（风险评估未能产出：%s）" % _stall_error_text(risk_outcome)
                 await _emit({"phase": "member_error", "member": "risk-manager",
                              "error": _stall_error_text(risk_outcome), "stage": "risk"})
             await _emit({"phase": "stage_done", "stage": "risk", "bytes": len(risk_report)})
         except asyncio.CancelledError:
             raise
         except Exception as e:
-            risk_report = f"（风控评估失败：{e}）"
+            risk_report = f"（风险评估失败：{e}）"
             await _emit({"phase": "member_error", "member": "risk-manager", "error": str(e), "stage": "risk"})
 
     # ---- Stage 3：决策 portfolio-manager ----
     decision_report = ""
     decision_prompt = team.get("decision_prompt") or team.get("lead_prompt") or DEFAULT_LEAD_PROMPT
-    await _emit({"phase": "stage_start", "stage": "decision", "label": "投资组合经理给出最终 BUY/SELL/HOLD 决策…",
+    await _emit({"phase": "stage_start", "stage": "decision",
+                 "label": _roundtable_label(team, "decision"),
                  "index": _n_stages - 1, "total": _n_stages})
     try:
-        decision_input = _stage_prompt(task, results, f"以下是 {len(results)} 位大师的完整信号：")
+        decision_input = _stage_prompt(task, results, f"以下是 {len(results)} 位成员的完整信号：")
         if risk_prompt:
             decision_input += f"\n\n—— 风险管理师评估 ——\n{risk_report}"
         decision_outcome, _attempts = await _run_design_agent_checked(
@@ -1032,7 +1060,7 @@ async def run_roundtable_stream(
             decision_report = decision_outcome.text
         else:
             # 决策没拿到可用正文时也要给用户可读的降级产出，而不是那句占位文案
-            decision_report = interrupted_fallback(results, "投资组合经理决策")
+            decision_report = interrupted_fallback(results, "最终决策")
             if risk_report:
                 decision_report += f"\n\n—— 风险管理师评估 ——\n{risk_report}"
             await _emit({"phase": "member_error", "member": "portfolio-manager",
@@ -1078,7 +1106,7 @@ def render_roundtable_markdown(team, task, results, risk_report, decision_report
         f"# 圆桌决策记录：{team.get('name', '?')}",
         f"目标任务：{task}",
         "",
-        f"## 一、{len(results)} 位大师/分析师信号",
+        f"## 一、{len(results)} 位成员的分析信号",
         "",
     ]
     for r in results:
@@ -1090,7 +1118,7 @@ def render_roundtable_markdown(team, task, results, risk_report, decision_report
     lines.append("## 二、风险评估")
     lines.append(risk_report or "（无）")
     lines.append("")
-    lines.append("## 三、最终决策（BUY/SELL/HOLD）")
+    lines.append("## 三、最终决策")
     lines.append(decision_report or "（无）")
     return "\n".join(lines)
 

@@ -1225,7 +1225,7 @@ async def test_truncation_warning_in_report():
 
 
 async def test_stage_prompt_uses_real_member_count():
-    """喂给风控/决策的提示里，「N 位大师」必须等于实际成员数。
+    """喂给风控/决策的提示里，「N 位成员」必须等于实际成员数。
 
     现象（2026-10-16）：这里写死了「以下是 19 位大师的完整信号」，而轻量版圆桌
     只有 5 位成员。决策代理被告知「19 位里有 5 份」——它会以为自己缺了 14 份信号，
@@ -1255,8 +1255,11 @@ async def test_stage_prompt_uses_real_member_count():
         restore_fakes()
 
     check("风控和决策都拿到了输入", len(seen_inputs) == 2, str(len(seen_inputs)))
-    check("提示里的「N 位大师」等于实际成员数（5）",
-          all("5 位大师" in txt for _n, txt in seen_inputs),
+    check("提示里的「N 位成员」等于实际成员数（5）",
+          all("5 位成员" in txt for _n, txt in seen_inputs),
+          str([txt[:40] for _n, txt in seen_inputs]))
+    check("措辞保持中性（不带投资域称呼）",
+          all("大师" not in txt and "投资" not in txt for _n, txt in seen_inputs),
           str([txt[:40] for _n, txt in seen_inputs]))
     check("不再出现写死的「19 位」",
           all("19 位" not in txt for _n, txt in seen_inputs),
@@ -1273,7 +1276,7 @@ async def test_stage_prompt_uses_real_member_count():
         await t.run_team_stream(rt19, "t", emit, {"agent": {}}, ".", member_timeout=5)
     finally:
         restore_fakes()
-    check("19 人团队显示 19 位", all("19 位大师" in txt for _n, txt in seen_inputs),
+    check("19 人团队显示 19 位", all("19 位成员" in txt for _n, txt in seen_inputs),
           str([txt[:40] for _n, txt in seen_inputs]))
 
 
@@ -1323,6 +1326,111 @@ async def test_risk_stage_report_is_emitted():
           str([e.get("phase") for e in events]))
 
 
+async def test_genericity_across_team_types():
+    """三种编排（扁平 / 圆桌 / 多阶段管线）的关键行为必须一致。
+
+    这些能力都做成了共用助手（_announce_member / _settle_member / _persist_member /
+    _emit_canceled_members），但「共用」得靠测试钉住：哪天谁在某个分支里绕开助手
+    直接写事件，就又回到「三份里改了一份」的老路——上一轮的 interrupt 检测失效
+    就是这么来的。
+    """
+    print("\n[泛用性：三种编排的关键行为一致]")
+    install_fakes()
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    cases = {
+        "扁平(parallel)": {"name": "并行", "lead_prompt": "汇总",
+                           "members": [{"name": "甲", "prompt": "p"},
+                                       {"name": "乙", "prompt": "p"}]},
+        "圆桌(roundtable)": {"name": "圆桌", "type": "roundtable",
+                             "members": [{"name": "甲", "prompt": "p"}],
+                             "risk_prompt": "风控", "decision_prompt": "决策"},
+        "管线(pipeline)": pipe_spec(),
+    }
+    problems = []
+    for kind, spec in cases.items():
+        events.clear()
+        try:
+            await t.run_team_stream(spec, "任务", emit, {"agent": {}}, ".", member_timeout=5)
+        except Exception as e:
+            problems.append(f"{kind}: 抛异常 {type(e).__name__}: {e}")
+            continue
+
+        done = [e for e in events if e["phase"] == "member_done"]
+        if not done:
+            problems.append(f"{kind}: 没有任何成员产出")
+            continue
+        for m in done:
+            if not m.get("summary"):
+                problems.append(f"{kind}: 成员 {m.get('member')} 的 member_done 缺 summary")
+            if not m.get("finished_reason"):
+                problems.append(f"{kind}: 成员 {m.get('member')} 的 member_done 缺 finished_reason")
+            if m.get("finished_reason") != t.REASON_COMPLETED:
+                problems.append(f"{kind}: 正常成员被标成 {m.get('finished_reason')}")
+
+        # 每位成员都「先报排队、再报开始」
+        for name in {e["member"] for e in events if e["phase"] == "member_start"}:
+            qi = [i for i, e in enumerate(events)
+                  if e["phase"] == "member_queued" and e["member"] == name]
+            si = [i for i, e in enumerate(events)
+                  if e["phase"] == "member_start" and e["member"] == name]
+            if not qi or not si:
+                problems.append(f"{kind}: {name} 缺排队或开始事件")
+            elif qi[0] > si[0]:
+                problems.append(f"{kind}: {name} 先报开始后报排队")
+    check("三种编排的成员事件一致（排队态 / 摘要 / 收尾原因）", not problems, str(problems[:4]))
+
+
+async def test_roundtable_labels_are_generic():
+    """圆桌的阶段文案要中性，且能被 team spec 覆盖。
+
+    原先写死「各位大师并行分析中…」「投资组合经理给出最终 BUY/SELL/HOLD 决策…」
+    ——这套编排是通用的，任何非投资域的圆桌都会显示错误的阶段标题。
+    （和写死「19 位大师」是同一类毛病。）
+    """
+    print("\n[圆桌文案：中性默认 + spec 可覆盖]")
+    events = []
+
+    async def emit(ev):
+        events.append(ev)
+
+    generic = {"name": "通用圆桌", "type": "roundtable",
+               "members": [{"name": "甲", "prompt": "p"}],
+               "risk_prompt": "风控", "decision_prompt": "决策"}
+
+    install_fakes()
+    try:
+        await t.run_team_stream(generic, "t", emit, {"agent": {}}, ".", member_timeout=5)
+    finally:
+        restore_fakes()
+    blob = " ".join([e.get("label", "") for e in events if e.get("phase") == "stage_start"]
+                    + [e.get("label", "") for e in events if e.get("phase") == "stage_report"])
+    for bad in ("大师", "投资", "BUY", "SELL", "HOLD", "组合经理", "风控"):
+        check(f"默认文案不含「{bad}」", bad not in blob, blob)
+
+    # spec 覆盖后，投资域措辞可以照旧
+    install_fakes()
+    events.clear()
+    custom = dict(generic)
+    custom["stage_labels"] = {"analysis": "各位大师并行分析中…",
+                              "risk": "风控总监评估…",
+                              "risk_report": "风控报告",
+                              "decision": "基金经理定夺…"}
+    try:
+        await t.run_team_stream(custom, "t", emit, {"agent": {}}, ".", member_timeout=5)
+    finally:
+        restore_fakes()
+    labels = [e.get("label") for e in events if e.get("phase") == "stage_start"]
+    check("spec 的 stage_labels 覆盖默认阶段标题",
+          labels == ["各位大师并行分析中…", "风控总监评估…", "基金经理定夺…"], str(labels))
+    srs = [e for e in events if e.get("phase") == "stage_report"]
+    check("阶段产出卡片的标题也可覆盖",
+          bool(srs) and srs[0].get("label") == "风控报告", str(srs[:1])[:90])
+
+
 async def main():
     await test_pipeline_basic()
     await test_pipeline_lead_final()
@@ -1346,6 +1454,8 @@ async def main():
     await test_truncation_warning_in_report()
     await test_stage_prompt_uses_real_member_count()
     await test_risk_stage_report_is_emitted()
+    await test_genericity_across_team_types()
+    await test_roundtable_labels_are_generic()
     await test_cancel_stops_team_and_settles_members()
     await test_temperature_optional()
     await test_config_clearing_temperature_removes_key()
